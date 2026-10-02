@@ -6,7 +6,6 @@ import numpy as np
 from telegram import Bot
 
 from database import init_db, save_trade, get_open_trades, update_trade_tp1, close_trade
-from pnl_card import generate_pnl_card
 
 # --- Configurations ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8983892388:AAFs6EgNNj5uqPNfUmn6Qap3kZAzNGq6IYM")
@@ -99,11 +98,8 @@ def analyze_1h_indicators(df_1h):
 
 def check_5m_choch_and_retest(df_5m, bias_1h):
     """
-    5M Strict SMC CHoCH & Retest Logic (As per provided diagrams):
-    - Bullish: Downtrend -> Candle body closes above recent swing high -> Retest / Higher Low
-    - Bearish: Uptrend -> Candle body closes below recent Higher Low (HL) -> Retest / Lower High
+    5M Strict SMC CHoCH & Retest Logic
     """
-    # Swing Highs සහ Lows හඳුනා ගැනීම (Fractal Pivots)
     highs = df_5m['high'].values
     lows = df_5m['low'].values
     closes = df_5m['close'].values
@@ -111,9 +107,8 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
 
     current_idx = len(df_5m) - 1
 
-    # --- 1. BULLISH CHoCH (Short to Long Reversal) ---
+    # 1. BULLISH CHoCH
     if bias_1h == "BULLISH":
-        # පෙර Downtrend එකේ Swing High (Lower High) එකක් සෙවීම
         recent_sh = None
         for i in range(current_idx - 3, current_idx - 15, -1):
             if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
@@ -121,17 +116,14 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
                 break
 
         if recent_sh is not None:
-            # අවසන් Candles 3 තුළ Bullish candle body එකක් Swing High එකට උඩින් close වී ඇත්දැයි බැලීම
             choch_confirmed = False
             for k in range(current_idx - 3, current_idx):
                 if closes[k] > recent_sh and closes[k] > opens[k]:
                     choch_confirmed = True
                     break
 
-            # CHoCH වී ඇති නම් සහ වත්මන් candle එක broken swing level එක retest කරන්නේ නම්
             if choch_confirmed:
                 curr = df_5m.iloc[-1]
-                # Retest touch: මිල නැවත Swing High මට්ටම ආසන්නයට ඇවිත් Higher Low එකක් හැදීම
                 if curr['low'] <= recent_sh * 1.0015 and curr['close'] >= recent_sh * 0.998:
                     sl_level = df_5m['low'].iloc[-12:].min()
                     sl = round(sl_level * 0.999, 4)
@@ -140,12 +132,11 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
 
                     if risk > 0 and (risk / entry) < 0.035:
                         tp1 = round(entry + (risk * 2), 4)
-                        tp2 = round(entry + (risk * 3.5), 4)  # 1:3+ RR
+                        tp2 = round(entry + (risk * 3.5), 4)
                         return "BUY", entry, sl, tp1, tp2
 
-    # --- 2. BEARISH CHoCH (Long to Short Reversal) ---
+    # 2. BEARISH CHoCH
     elif bias_1h == "BEARISH":
-        # පෙර Uptrend එකේ Swing Low (Higher Low) එකක් සෙවීම
         recent_hl = None
         for i in range(current_idx - 3, current_idx - 15, -1):
             if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
@@ -153,17 +144,14 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
                 break
 
         if recent_hl is not None:
-            # Bearish candle body එකක් Higher Low එකට යටින් close වී ඇත්දැයි බැලීම
             choch_confirmed = False
             for k in range(current_idx - 3, current_idx):
                 if closes[k] < recent_hl and closes[k] < opens[k]:
                     choch_confirmed = True
                     break
 
-            # CHoCH වී ඇති නම් සහ වත්මන් candle එක broken HL level එක retest කරන්නේ නම්
             if choch_confirmed:
                 curr = df_5m.iloc[-1]
-                # Retest touch: මිල නැවත broken HL මට්ටමට touch වීම
                 if curr['high'] >= recent_hl * 0.9985 and curr['close'] <= recent_hl * 1.002:
                     sl_level = df_5m['high'].iloc[-12:].max()
                     sl = round(sl_level * 1.001, 4)
@@ -172,7 +160,7 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
 
                     if risk > 0 and (risk / entry) < 0.035:
                         tp1 = round(entry - (risk * 2), 4)
-                        tp2 = round(entry - (risk * 3.5), 4)  # 1:3+ RR
+                        tp2 = round(entry - (risk * 3.5), 4)
                         return "SELL", entry, sl, tp1, tp2
 
     return None, None, None, None, None
@@ -201,6 +189,7 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
     print(f"\n🔥 [VALID CHoCH SIGNAL] Sent to Telegram: {pair_display} {side}")
 
 async def monitor_open_trades():
+    """PNL Card (Images) නවතා Database update සහ text alert පමණක් තබා ඇත"""
     trades = await get_open_trades()
     for trade in trades:
         t_id, sym, side, entry, sl, tp1, tp2, tp1_hit, _ = trade
@@ -210,43 +199,29 @@ async def monitor_open_trades():
             pair_clean = sym.split(':')[0]
 
             if side == "BUY":
-                raw_roi = ((last_price - entry) / entry) * 100
-                pnl_pct = raw_roi * 10
-
                 if not tp1_hit and last_price >= tp1:
-                    card = generate_pnl_card(pair_clean, side, entry, tp1, pnl_pct, "TP 1 HIT")
-                    await tg_bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=card, caption=f"🎯 {pair_clean} TP 1 Achieved!")
+                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🎯 <b>{pair_clean} TP 1 Achieved!</b>", parse_mode="HTML")
                     await update_trade_tp1(t_id)
 
                 elif last_price >= tp2:
-                    card = generate_pnl_card(pair_clean, side, entry, tp2, pnl_pct, "TP 2 (1:3.5) HIT")
-                    await tg_bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=card, caption=f"🚀 {pair_clean} Target (1:3.5) Hit!")
+                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 <b>{pair_clean} Take Profit 2 (1:3.5) Hit!</b>", parse_mode="HTML")
                     await close_trade(t_id, "CLOSED_PROFIT")
 
                 elif last_price <= sl:
-                    loss_pct = (((sl - entry) / entry) * 100) * 10
-                    card = generate_pnl_card(pair_clean, side, entry, sl, loss_pct, "STOP LOSS")
-                    await tg_bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=card, caption=f"🛑 {pair_clean} Stop Loss Triggered.")
+                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🛑 <b>{pair_clean} Stop Loss Hit!</b>", parse_mode="HTML")
                     await close_trade(t_id, "CLOSED_LOSS")
 
             elif side == "SELL":
-                raw_roi = ((entry - last_price) / entry) * 100
-                pnl_pct = raw_roi * 10
-
                 if not tp1_hit and last_price <= tp1:
-                    card = generate_pnl_card(pair_clean, side, entry, tp1, pnl_pct, "TP 1 HIT")
-                    await tg_bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=card, caption=f"🎯 {pair_clean} TP 1 Achieved!")
+                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🎯 <b>{pair_clean} TP 1 Achieved!</b>", parse_mode="HTML")
                     await update_trade_tp1(t_id)
 
                 elif last_price <= tp2:
-                    card = generate_pnl_card(pair_clean, side, entry, tp2, pnl_pct, "TP 2 (1:3.5) HIT")
-                    await tg_bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=card, caption=f"🚀 {pair_clean} Target (1:3.5) Hit!")
+                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 <b>{pair_clean} Take Profit 2 (1:3.5) Hit!</b>", parse_mode="HTML")
                     await close_trade(t_id, "CLOSED_PROFIT")
 
                 elif last_price >= sl:
-                    loss_pct = (((entry - sl) / entry) * 100) * 10
-                    card = generate_pnl_card(pair_clean, side, entry, sl, loss_pct, "STOP LOSS")
-                    await tg_bot.send_photo(chat_id=TELEGRAM_CHAT_ID, photo=card, caption=f"🛑 {pair_clean} Stop Loss Triggered.")
+                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🛑 <b>{pair_clean} Stop Loss Hit!</b>", parse_mode="HTML")
                     await close_trade(t_id, "CLOSED_LOSS")
 
         except Exception:
@@ -263,7 +238,7 @@ async def main():
             print("Connecting to Bybit... retrying in 5s.")
             await asyncio.sleep(5)
             
-    print("🚀 Scanner Active: Accurate 1H SMC + 5M Valid Candle-Body CHoCH scanning...")
+    print("🚀 Scanner Active: Accurate 1H SMC + 5M Valid CHoCH (PNL Card Disabled)...")
 
     while True:
         try:
