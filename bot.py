@@ -9,7 +9,7 @@ from database import init_db, save_trade, get_open_trades, update_trade_tp1, clo
 from pnl_card import generate_pnl_card
 
 # --- Configurations ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8083892308:AAF4G6EghNjj5uqPNfUmn6Qap3kZAZNqQdIYH")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8983892388:AAFs6EgNNj5uqPNfUmn6Qap3kZAzNGq6IYM")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1004306671705")
 
 bybit = ccxt.bybit({
@@ -20,7 +20,6 @@ bybit = ccxt.bybit({
 })
 tg_bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-# Signal spam වීම වැළැක්වීමට Cooldown Tracker
 alerted_cooldown = {}
 
 # --- Indicator Calculations ---
@@ -71,24 +70,21 @@ async def fetch_ohlcv(symbol, timeframe, limit=100):
 def analyze_1h_indicators(df_1h):
     """
     1-Hour Chart Conformations:
-    Long: Close > 50 EMA, 50 CCI > 0, 7 CCI was Oversold (<-100) & turning up
-    Short: Close < 50 EMA, 50 CCI < 0, 7 CCI was Overbought (>100) & turning down
+    Long: Close > 50 EMA, 50 CCI > 0, 7 CCI was Oversold (<-100)
+    Short: Close < 50 EMA, 50 CCI < 0, 7 CCI was Overbought (>100)
     """
     df_1h['EMA50'] = calculate_ema(df_1h['close'], 50)
     df_1h['CCI50'] = calculate_cci(df_1h, 50)
     df_1h['CCI7']  = calculate_cci(df_1h, 7)
 
-    # අවසන් closed candle එක පරීක්ෂාව (-2)
     last = df_1h.iloc[-2]
 
-    # Long Setup on 1H
     long_condition = (
         (last['close'] > last['EMA50']) and
         (last['CCI50'] > 0) and
         (df_1h['CCI7'].iloc[-4:-1].min() < -100)
     )
 
-    # Short Setup on 1H
     short_condition = (
         (last['close'] < last['EMA50']) and
         (last['CCI50'] < 0) and
@@ -103,47 +99,81 @@ def analyze_1h_indicators(df_1h):
 
 def check_5m_choch_and_retest(df_5m, bias_1h):
     """
-    5-Minute Chart SMC Rules:
-    1. CHoCH: Candle close beyond Swing Level
-    2. Retest: Current pullback touches the broken swing zone
+    5M Strict SMC CHoCH & Retest Logic (As per provided diagrams):
+    - Bullish: Downtrend -> Candle body closes above recent swing high -> Retest / Higher Low
+    - Bearish: Uptrend -> Candle body closes below recent Higher Low (HL) -> Retest / Lower High
     """
-    # පෙර හැදුණු Candles වලින් Swing High/Low නිර්ණය
-    swing_high = df_5m['high'].iloc[-20:-4].max()
-    swing_low = df_5m['low'].iloc[-20:-4].min()
+    # Swing Highs සහ Lows හඳුනා ගැනීම (Fractal Pivots)
+    highs = df_5m['high'].values
+    lows = df_5m['low'].values
+    closes = df_5m['close'].values
+    opens = df_5m['open'].values
 
-    # පසුගිය කැන්ඩල් 3 තුළ CHoCH එකක් සිදුවී ඇතිදැයි බැලීම
-    recent_closes = df_5m['close'].iloc[-4:-1]
-    current_candle = df_5m.iloc[-1]
+    current_idx = len(df_5m) - 1
 
-    # --- Bullish Conformation ---
+    # --- 1. BULLISH CHoCH (Short to Long Reversal) ---
     if bias_1h == "BULLISH":
-        had_choch = (recent_closes > swing_high).any()
-        # Broken swing high zone එක retest කිරීම
-        valid_retest = (current_candle['low'] <= swing_high * 1.002) and (current_candle['close'] >= swing_high * 0.998)
+        # පෙර Downtrend එකේ Swing High (Lower High) එකක් සෙවීම
+        recent_sh = None
+        for i in range(current_idx - 3, current_idx - 15, -1):
+            if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
+                recent_sh = highs[i]
+                break
 
-        if had_choch and valid_retest:
-            sl = round(swing_low * 0.9985, 4)
-            entry = round(current_candle['close'], 4)
-            risk = entry - sl
-            if risk > 0 and (risk / entry) < 0.04:  # SL එක 4% කට වඩා වැඩි නම් risk එක වැඩියි
-                tp1 = round(entry + (risk * 2), 4)
-                tp2 = round(entry + (risk * 3.5), 4)  # 1:3+ RR
-                return "BUY", entry, sl, tp1, tp2
+        if recent_sh is not None:
+            # අවසන් Candles 3 තුළ Bullish candle body එකක් Swing High එකට උඩින් close වී ඇත්දැයි බැලීම
+            choch_confirmed = False
+            for k in range(current_idx - 3, current_idx):
+                if closes[k] > recent_sh and closes[k] > opens[k]:
+                    choch_confirmed = True
+                    break
 
-    # --- Bearish Conformation ---
+            # CHoCH වී ඇති නම් සහ වත්මන් candle එක broken swing level එක retest කරන්නේ නම්
+            if choch_confirmed:
+                curr = df_5m.iloc[-1]
+                # Retest touch: මිල නැවත Swing High මට්ටම ආසන්නයට ඇවිත් Higher Low එකක් හැදීම
+                if curr['low'] <= recent_sh * 1.0015 and curr['close'] >= recent_sh * 0.998:
+                    sl_level = df_5m['low'].iloc[-12:].min()
+                    sl = round(sl_level * 0.999, 4)
+                    entry = round(curr['close'], 4)
+                    risk = entry - sl
+
+                    if risk > 0 and (risk / entry) < 0.035:
+                        tp1 = round(entry + (risk * 2), 4)
+                        tp2 = round(entry + (risk * 3.5), 4)  # 1:3+ RR
+                        return "BUY", entry, sl, tp1, tp2
+
+    # --- 2. BEARISH CHoCH (Long to Short Reversal) ---
     elif bias_1h == "BEARISH":
-        had_choch = (recent_closes < swing_low).any()
-        # Broken swing low zone එක retest කිරීම
-        valid_retest = (current_candle['high'] >= swing_low * 0.998) and (current_candle['close'] <= swing_low * 1.002)
+        # පෙර Uptrend එකේ Swing Low (Higher Low) එකක් සෙවීම
+        recent_hl = None
+        for i in range(current_idx - 3, current_idx - 15, -1):
+            if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
+                recent_hl = lows[i]
+                break
 
-        if had_choch and valid_retest:
-            sl = round(swing_high * 1.0015, 4)
-            entry = round(current_candle['close'], 4)
-            risk = sl - entry
-            if risk > 0 and (risk / entry) < 0.04:
-                tp1 = round(entry - (risk * 2), 4)
-                tp2 = round(entry - (risk * 3.5), 4)  # 1:3+ RR
-                return "SELL", entry, sl, tp1, tp2
+        if recent_hl is not None:
+            # Bearish candle body එකක් Higher Low එකට යටින් close වී ඇත්දැයි බැලීම
+            choch_confirmed = False
+            for k in range(current_idx - 3, current_idx):
+                if closes[k] < recent_hl and closes[k] < opens[k]:
+                    choch_confirmed = True
+                    break
+
+            # CHoCH වී ඇති නම් සහ වත්මන් candle එක broken HL level එක retest කරන්නේ නම්
+            if choch_confirmed:
+                curr = df_5m.iloc[-1]
+                # Retest touch: මිල නැවත broken HL මට්ටමට touch වීම
+                if curr['high'] >= recent_hl * 0.9985 and curr['close'] <= recent_hl * 1.002:
+                    sl_level = df_5m['high'].iloc[-12:].max()
+                    sl = round(sl_level * 1.001, 4)
+                    entry = round(curr['close'], 4)
+                    risk = sl - entry
+
+                    if risk > 0 and (risk / entry) < 0.035:
+                        tp1 = round(entry - (risk * 2), 4)
+                        tp2 = round(entry - (risk * 3.5), 4)  # 1:3+ RR
+                        return "SELL", entry, sl, tp1, tp2
 
     return None, None, None, None, None
 
@@ -152,16 +182,15 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
     direction_text = "🟢 LONG" if side == "BUY" else "🔴 SHORT"
     
     msg = (
-        f"🚨 <b>HIGH-PROBABILITY SMC SIGNAL</b> 🚨\n\n"
+        f"🚨 <b>VALID SMC CHoCH SIGNAL</b> 🚨\n\n"
         f"<b>Exchange:</b> Bybit Futures\n"
         f"<b>Pair:</b> #{pair_display.replace('/', '')}\n"
         f"<b>Direction:</b> {direction_text}\n\n"
         f"<b>Conformations Passed:</b>\n"
-        f"• 1H EMA 50 Trend Filter: Passed\n"
-        f"• 1H 50 CCI Zero Line: Valid\n"
+        f"• 1H 50 EMA & 50 CCI: Confirmed\n"
         f"• 1H 7 CCI Exhaustion: Completed\n"
-        f"• 5M CHoCH: Structure Broken\n"
-        f"• 5M Retest: Key Level Touched\n\n"
+        f"• 5M CHoCH: Candle Body Breakout Confirmed\n"
+        f"• 5M Retest: Key Level Retested\n\n"
         f"🎯 <b>Entry:</b> {entry}\n"
         f"🛑 <b>Stop Loss:</b> {sl}\n"
         f"🎯 <b>Take Profit 1:</b> {tp1} (1:2)\n"
@@ -169,7 +198,7 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
     )
     await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="HTML")
     await save_trade(symbol, side, entry, sl, tp1, tp2)
-    print(f"\n🔥 [VALID SIGNAL] Sent to Telegram: {pair_display} {side}")
+    print(f"\n🔥 [VALID CHoCH SIGNAL] Sent to Telegram: {pair_display} {side}")
 
 async def monitor_open_trades():
     trades = await get_open_trades()
@@ -234,7 +263,7 @@ async def main():
             print("Connecting to Bybit... retrying in 5s.")
             await asyncio.sleep(5)
             
-    print("🚀 Scanner Active: Accurate 1H SMC + 5M CHoCH & Retest verification...")
+    print("🚀 Scanner Active: Accurate 1H SMC + 5M Valid Candle-Body CHoCH scanning...")
 
     while True:
         try:
@@ -256,7 +285,6 @@ async def main():
                             side, entry, sl, tp1, tp2 = check_5m_choch_and_retest(df_5m, bias_1h)
 
                             if side and entry:
-                                # එකම coin එකට විනාඩි 60ක් යනකම් නැවත signal නොයැවීම (Cooldown)
                                 now = asyncio.get_event_loop().time()
                                 last_alert_time = alerted_cooldown.get(symbol, 0)
                                 
@@ -271,7 +299,7 @@ async def main():
             print(f"\n🔄 Completed 1 cycle of {total} pairs. Waiting 20s for next cycle...")
 
         except Exception as e:
-            print(f"\n⚠️️ Main loop alert: {e}")
+            print(f"\n⚠️ Main loop alert: {e}")
             await asyncio.sleep(5)
 
         await asyncio.sleep(20)
