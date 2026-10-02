@@ -1,0 +1,7 @@
+crypto_smc_bot/
+│
+├── .env
+├── requirements.txt
+├── bot.py
+├── pnl_card.py
+└── database.py
