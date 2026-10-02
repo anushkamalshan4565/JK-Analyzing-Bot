@@ -189,39 +189,28 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
     print(f"\n🔥 [VALID CHoCH SIGNAL] Sent to Telegram: {pair_display} {side}")
 
 async def monitor_open_trades():
-    """PNL Card (Images) නවතා Database update සහ text alert පමණක් තබා ඇත"""
+    """Telegram එකට කිසිම Stop Loss හෝ TP message එකක් නොයවා Database එක පමණක් update කිරීම"""
     trades = await get_open_trades()
     for trade in trades:
         t_id, sym, side, entry, sl, tp1, tp2, tp1_hit, _ = trade
         try:
             ticker = await bybit.fetch_ticker(sym, params={'category': 'linear'})
             last_price = ticker['last']
-            pair_clean = sym.split(':')[0]
 
             if side == "BUY":
                 if not tp1_hit and last_price >= tp1:
-                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🎯 <b>{pair_clean} TP 1 Achieved!</b>", parse_mode="HTML")
                     await update_trade_tp1(t_id)
-
                 elif last_price >= tp2:
-                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 <b>{pair_clean} Take Profit 2 (1:3.5) Hit!</b>", parse_mode="HTML")
                     await close_trade(t_id, "CLOSED_PROFIT")
-
                 elif last_price <= sl:
-                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🛑 <b>{pair_clean} Stop Loss Hit!</b>", parse_mode="HTML")
                     await close_trade(t_id, "CLOSED_LOSS")
 
             elif side == "SELL":
                 if not tp1_hit and last_price <= tp1:
-                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🎯 <b>{pair_clean} TP 1 Achieved!</b>", parse_mode="HTML")
                     await update_trade_tp1(t_id)
-
                 elif last_price <= tp2:
-                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🚀 <b>{pair_clean} Take Profit 2 (1:3.5) Hit!</b>", parse_mode="HTML")
                     await close_trade(t_id, "CLOSED_PROFIT")
-
                 elif last_price >= sl:
-                    await tg_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=f"🛑 <b>{pair_clean} Stop Loss Hit!</b>", parse_mode="HTML")
                     await close_trade(t_id, "CLOSED_LOSS")
 
         except Exception:
@@ -238,7 +227,7 @@ async def main():
             print("Connecting to Bybit... retrying in 5s.")
             await asyncio.sleep(5)
             
-    print("🚀 Scanner Active: Accurate 1H SMC + 5M Valid CHoCH (PNL Card Disabled)...")
+    print("🚀 Scanner Active: Accurate 1H SMC + 5M Valid CHoCH (Only Confirmed Signals to Telegram)...")
 
     while True:
         try:
@@ -274,7 +263,7 @@ async def main():
             print(f"\n🔄 Completed 1 cycle of {total} pairs. Waiting 20s for next cycle...")
 
         except Exception as e:
-            print(f"\n⚠️ Main loop alert: {e}")
+            print(f"\n⚠️️ Main loop alert: {e}")
             await asyncio.sleep(5)
 
         await asyncio.sleep(20)
