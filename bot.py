@@ -285,12 +285,16 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
 
 async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
     pair_display = symbol.split(':')[0]
+    clean_pair = pair_display.replace('/', '')
     direction_text = "🟢 LONG" if side == "BUY" else "🔴 SHORT"
+    
+    # TradingView Direct Chart Link (Bybit Futures)
+    tv_chart_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{clean_pair}.P"
 
     msg = (
         f"🚨 <b>JK Analyzing</b> 🚨\n\n"
         f"<b>Exchange:</b> Bybit Futures\n"
-        f"<b>Pair:</b> #{pair_display.replace('/', '')}\n"
+        f"<b>Pair:</b> #{clean_pair}\n"
         f"<b>Direction:</b> {direction_text}\n\n"
         f"<b>Conformations Passed:</b>\n"
         f"• 1H 50 EMA & 50 CCI: Confirmed\n"
@@ -300,13 +304,15 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
         f"🎯 <b>Entry:</b> {entry}\n"
         f"🛑 <b>Stop Loss:</b> {sl}\n"
         f"🎯 <b>Take Profit 1:</b> {tp1} (1:2)\n"
-        f"🚀 <b>Take Profit 2:</b> {tp2} (1:3.5+)\n"
+        f"🚀 <b>Take Profit 2:</b> {tp2} (1:3.5+)\n\n"
+        f"📊 <b>Chart:</b> <a href='{tv_chart_url}'>Open on TradingView ↗</a>\n"
     )
 
     await tg_bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
         text=msg,
-        parse_mode="HTML"
+        parse_mode="HTML",
+        disable_web_page_preview=True
     )
 
     await save_trade(symbol, side, entry, sl, tp1, tp2)
