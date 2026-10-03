@@ -1,6 +1,7 @@
 import os
 import asyncio
 from datetime import datetime, timezone
+from html import escape
 
 import ccxt.async_support as ccxt
 import pandas as pd
@@ -27,6 +28,7 @@ TELEGRAM_CHAT_ID = "-1004306671705"
 
 
 if not TELEGRAM_BOT_TOKEN:
+
     raise RuntimeError(
         "TELEGRAM_BOT_TOKEN environment variable is not set."
     )
@@ -39,6 +41,7 @@ if not TELEGRAM_BOT_TOKEN:
 bybit = ccxt.bybit(
     {
         "enableRateLimit": True,
+
         "options": {
             "defaultType": "linear",
         },
@@ -46,7 +49,9 @@ bybit = ccxt.bybit(
 )
 
 
-tg_bot = Bot(token=TELEGRAM_BOT_TOKEN)
+tg_bot = Bot(
+    token=TELEGRAM_BOT_TOKEN
+)
 
 
 # ============================================================
@@ -91,7 +96,10 @@ sent_setup_ids = set()
 # EMA
 # ============================================================
 
-def calculate_ema(series, length):
+def calculate_ema(
+    series,
+    length
+):
 
     return series.ewm(
         span=length,
@@ -103,7 +111,10 @@ def calculate_ema(series, length):
 # CCI
 # ============================================================
 
-def calculate_cci(df, length):
+def calculate_cci(
+    df,
+    length
+):
 
     typical_price = (
         df["high"]
@@ -307,7 +318,9 @@ async def fetch_ohlcv(
 # 1H TREND / BIAS
 # ============================================================
 
-def analyze_1h_indicators(df_1h):
+def analyze_1h_indicators(
+    df_1h
+):
 
     if df_1h is None:
         return "NEUTRAL"
@@ -453,7 +466,10 @@ def find_confirmed_swings(
         if is_low:
             swing_lows.append(i)
 
-    return swing_highs, swing_lows
+    return (
+        swing_highs,
+        swing_lows
+    )
 
 
 # ============================================================
@@ -478,7 +494,9 @@ def candle_body_ratio(
         close_price - open_price
     )
 
-    return body / candle_range
+    return (
+        body / candle_range
+    )
 
 
 # ============================================================
@@ -511,6 +529,7 @@ def detect_bullish_liquidity_sweep(
         )
 
         if swept and recovered:
+
             return i
 
     return None
@@ -542,6 +561,7 @@ def detect_bearish_liquidity_sweep(
         )
 
         if swept and recovered:
+
             return i
 
     return None
@@ -567,7 +587,6 @@ def find_bullish_fvg(
         end_idx + 1
     ):
 
-        # Bullish FVG
         if lows[i] > highs[i - 2]:
 
             zones.append(
@@ -597,7 +616,6 @@ def find_bearish_fvg(
         end_idx + 1
     ):
 
-        # Bearish FVG
         if highs[i] < lows[i - 2]:
 
             zones.append(
@@ -625,9 +643,8 @@ def find_bullish_order_block(
     highs = df["high"].values
     lows = df["low"].values
 
-    # Last bearish candle before bullish breakout
-
     start = breakout_idx - 1
+
     stop = max(
         -1,
         breakout_idx - 8
@@ -660,9 +677,8 @@ def find_bearish_order_block(
     highs = df["high"].values
     lows = df["low"].values
 
-    # Last bullish candle before bearish breakout
-
     start = breakout_idx - 1
+
     stop = max(
         -1,
         breakout_idx - 8
@@ -698,6 +714,7 @@ def price_touches_zone(
 ):
 
     if zone_low > zone_high:
+
         zone_low, zone_high = (
             zone_high,
             zone_low
@@ -728,21 +745,6 @@ def check_5m_choch_and_retest(
     df_5m,
     bias_1h
 ):
-
-    """
-    FINAL 5M FLOW
-
-    1. Closed candles only
-    2. Confirmed swing structure
-    3. Liquidity sweep
-    4. Strong CHoCH body break
-    5. Displacement
-    6. FVG OR Order Block
-    7. CURRENT CLOSED CANDLE retest
-    8. Rejection candle
-    9. Protected SL
-    10. TP1 / TP2
-    """
 
     empty_result = (
         None,
@@ -784,12 +786,13 @@ def check_5m_choch_and_retest(
     # SWINGS
     # ========================================================
 
-    swing_highs, swing_lows = (
-        find_confirmed_swings(
-            df,
-            SWING_LEFT,
-            SWING_RIGHT
-        )
+    (
+        swing_highs,
+        swing_lows
+    ) = find_confirmed_swings(
+        df,
+        SWING_LEFT,
+        SWING_RIGHT
     )
 
     if (
@@ -797,6 +800,7 @@ def check_5m_choch_and_retest(
         or
         len(swing_lows) < 2
     ):
+
         return empty_result
 
     recent_highs = [
@@ -816,7 +820,9 @@ def check_5m_choch_and_retest(
         or
         len(recent_lows) < 2
     ):
+
         return empty_result
+
 
     # ========================================================
     # BEARISH SETUP
@@ -850,8 +856,6 @@ def check_5m_choch_and_retest(
             current_idx - STRUCTURE_LOOKBACK
         )
 
-        # Don't use the current closed candle as sweep
-        # because it must become the retest/rejection candle.
         sweep_end = current_idx - 2
 
         if sweep_end <= sweep_start:
@@ -910,6 +914,7 @@ def check_5m_choch_and_retest(
                 ):
 
                     breakout_idx = k
+
                     break
 
         if breakout_idx is None:
@@ -945,12 +950,12 @@ def check_5m_choch_and_retest(
             )
         )
 
-        # At least ONE zone must exist.
         if (
             fvg is None
             and
             order_block is None
         ):
+
             return empty_result
 
         # ====================================================
@@ -969,7 +974,7 @@ def check_5m_choch_and_retest(
             return empty_result
 
         # ====================================================
-        # ONLY CURRENT CLOSED CANDLE
+        # CURRENT CLOSED CANDLE
         # ====================================================
 
         r = current_idx
@@ -997,10 +1002,6 @@ def check_5m_choch_and_retest(
 
         # ====================================================
         # FVG / OB RETEST
-        #
-        # IMPORTANT:
-        # FVG OR OB
-        # NOT FVG AND OB
         # ====================================================
 
         fvg_touch = False
@@ -1031,6 +1032,7 @@ def check_5m_choch_and_retest(
             or
             ob_touch
         ):
+
             return empty_result
 
         # ====================================================
@@ -1090,7 +1092,6 @@ def check_5m_choch_and_retest(
             retest_close
         )
 
-        # Protected SL
         structure_sl = (
             protected_high
             * 1.0035
@@ -1120,6 +1121,7 @@ def check_5m_choch_and_retest(
             <= risk_percent
             <= MAX_RISK_PERCENT
         ):
+
             return empty_result
 
         tp1 = (
@@ -1146,6 +1148,7 @@ def check_5m_choch_and_retest(
             round(tp2, 8),
             setup_id,
         )
+
 
     # ========================================================
     # BULLISH SETUP
@@ -1237,6 +1240,7 @@ def check_5m_choch_and_retest(
                 ):
 
                     breakout_idx = k
+
                     break
 
         if breakout_idx is None:
@@ -1272,12 +1276,12 @@ def check_5m_choch_and_retest(
             )
         )
 
-        # At least ONE zone must exist.
         if (
             fvg is None
             and
             order_block is None
         ):
+
             return empty_result
 
         # ====================================================
@@ -1296,7 +1300,7 @@ def check_5m_choch_and_retest(
             return empty_result
 
         # ====================================================
-        # ONLY CURRENT CLOSED CANDLE
+        # CURRENT CLOSED CANDLE
         # ====================================================
 
         r = current_idx
@@ -1324,9 +1328,6 @@ def check_5m_choch_and_retest(
 
         # ====================================================
         # FVG / OB RETEST
-        #
-        # IMPORTANT:
-        # FVG OR OB
         # ====================================================
 
         fvg_touch = False
@@ -1357,6 +1358,7 @@ def check_5m_choch_and_retest(
             or
             ob_touch
         ):
+
             return empty_result
 
         # ====================================================
@@ -1416,7 +1418,6 @@ def check_5m_choch_and_retest(
             retest_close
         )
 
-        # Protected SL
         structure_sl = (
             protected_low
             * 0.9965
@@ -1446,6 +1447,7 @@ def check_5m_choch_and_retest(
             <= risk_percent
             <= MAX_RISK_PERCENT
         ):
+
             return empty_result
 
         tp1 = (
@@ -1473,10 +1475,6 @@ def check_5m_choch_and_retest(
             setup_id,
         )
 
-    # ========================================================
-    # NO SIGNAL
-    # ========================================================
-
     return empty_result
 
 
@@ -1484,7 +1482,9 @@ def check_5m_choch_and_retest(
 # SYMBOL DISPLAY
 # ============================================================
 
-def get_clean_symbol(symbol):
+def get_clean_symbol(
+    symbol
+):
 
     try:
 
@@ -1504,7 +1504,80 @@ def get_clean_symbol(symbol):
 
 
 # ============================================================
-# TELEGRAM BROADCAST
+# TRADINGVIEW LINK
+# ============================================================
+
+def get_tradingview_url(
+    symbol
+):
+
+    """
+    Example:
+
+    BTC/USDT:USDT
+        ↓
+    BYBIT:BTCUSDT.P
+
+    LIT/USDT:USDT
+        ↓
+    BYBIT:LITUSDT.P
+    """
+
+    clean_pair = get_clean_symbol(
+        symbol
+    )
+
+    tradingview_symbol = (
+        f"BYBIT:{clean_pair}.P"
+    )
+
+    url = (
+        "https://www.tradingview.com/chart/"
+        f"?symbol={tradingview_symbol}"
+    )
+
+    return url
+
+
+# ============================================================
+# PRICE FORMATTER
+# ============================================================
+
+def format_price(
+    price
+):
+
+    try:
+
+        price = float(price)
+
+        if price >= 1000:
+            return f"{price:.2f}"
+
+        if price >= 100:
+            return f"{price:.3f}"
+
+        if price >= 10:
+            return f"{price:.4f}"
+
+        if price >= 1:
+            return f"{price:.4f}"
+
+        if price >= 0.1:
+            return f"{price:.5f}"
+
+        if price >= 0.01:
+            return f"{price:.6f}"
+
+        return f"{price:.8f}"
+
+    except Exception:
+
+        return str(price)
+
+
+# ============================================================
+# TELEGRAM SIGNAL BROADCAST
 # ============================================================
 
 async def broadcast_signal(
@@ -1520,21 +1593,58 @@ async def broadcast_signal(
         symbol
     )
 
-    direction_text = (
-        "🟢 LONG"
-        if side == "BUY"
-        else
-        "🔴 SHORT"
-    )
+    # ========================================================
+    # DIRECTION
+    # ========================================================
+
+    if side == "BUY":
+
+        direction_text = "🟢 LONG"
+
+    else:
+
+        direction_text = "🔴 SHORT"
+
+
+    # ========================================================
+    # TRADINGVIEW
+    # ========================================================
 
     tv_chart_url = (
-        "https://www.tradingview.com/chart/"
-        f"?symbol=BYBIT:{clean_pair}.P"
+        get_tradingview_url(
+            symbol
+        )
     )
+
+
+    # ========================================================
+    # FORMAT PRICES
+    # ========================================================
+
+    entry_text = format_price(
+        entry
+    )
+
+    sl_text = format_price(
+        sl
+    )
+
+    tp1_text = format_price(
+        tp1
+    )
+
+    tp2_text = format_price(
+        tp2
+    )
+
+
+    # ========================================================
+    # SIGNAL MESSAGE
+    # ========================================================
 
     message = (
 
-        "🚨 <b>JK ANALYZING</b> 🚨\n\n"
+        "🚨 <b>JK Analyzing</b> 🚨\n\n"
 
         "<b>Exchange:</b> Bybit Futures\n"
 
@@ -1544,36 +1654,37 @@ async def broadcast_signal(
 
         "<b>Confirmations Passed:</b>\n"
 
-        "• 1H Trend & Momentum: Aligned\n"
+        "• 1H Trend &amp; Momentum: Aligned\n"
 
-        "• 5M Liquidity Sweep: Confirmed\n"
+        "• 5M Major CHoCH: Confirmed Body Break\n"
 
-        "• 5M CHoCH: Strong Body Break\n"
+        "• 5M CHoCH: Closed Candle Confirmation\n"
 
-        "• 5M Displacement: Confirmed\n"
-
-        "• 5M FVG / Order Block: Confirmed\n"
-
-        "• 5M CHoCH Retest: Confirmed\n"
+        "• 5M Retest: Level Confirmed\n"
 
         "• 5M Rejection: Confirmed Closed Candle\n\n"
 
-        f"🎯 <b>Entry:</b> {entry}\n"
+        f"🎯 <b>Entry:</b> {entry_text}\n"
 
         f"🛑 <b>Stop Loss:</b> "
-        f"{sl} (Swing Protected)\n"
+        f"{sl_text} (Swing Protected)\n"
 
         f"🎯 <b>Take Profit 1:</b> "
-        f"{tp1} (1:{TP1_R})\n"
+        f"{tp1_text} (1:{TP1_R})\n"
 
         f"🚀 <b>Take Profit 2:</b> "
-        f"{tp2} (1:{TP2_R})\n\n"
+        f"{tp2_text} (1:{TP2_R})\n\n"
 
         f"📊 <b>Chart:</b> "
-        f"<a href='{tv_chart_url}'>"
+        f"<a href=\"{tv_chart_url}\">"
         "Open on TradingView ↗"
-        "</a>\n"
+        "</a>"
     )
+
+
+    # ========================================================
+    # SEND TELEGRAM
+    # ========================================================
 
     await tg_bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
@@ -1581,6 +1692,11 @@ async def broadcast_signal(
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
+
+
+    # ========================================================
+    # SAVE TRADE
+    # ========================================================
 
     await save_trade(
         symbol,
@@ -1591,14 +1707,20 @@ async def broadcast_signal(
         tp2,
     )
 
+
     print(
         f"\n🔥 SIGNAL SENT | "
         f"{clean_pair} | "
         f"{side} | "
-        f"Entry={entry} | "
-        f"SL={sl} | "
-        f"TP1={tp1} | "
-        f"TP2={tp2}"
+        f"Entry={entry_text} | "
+        f"SL={sl_text} | "
+        f"TP1={tp1_text} | "
+        f"TP2={tp2_text}"
+    )
+
+    print(
+        f"📊 TradingView: "
+        f"{tv_chart_url}"
     )
 
 
@@ -1612,14 +1734,19 @@ async def test_telegram():
 
         await tg_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
+
             text=(
                 "✅ <b>JK ANALYZING BOT CONNECTED</b>\n\n"
-                "Scanner is now active.\n"
+
+                "Scanner is now active.\n\n"
+
                 "🟢 Closed Candle Only\n"
                 "🛑 Protected SL\n"
                 "🎯 TP1 1:1.5\n"
-                "🚀 TP2 1:2.5"
+                "🚀 TP2 1:2.5\n"
+                "📊 Dynamic TradingView Chart"
             ),
+
             parse_mode="HTML",
         )
 
@@ -1796,7 +1923,9 @@ async def schedule_weekly_report():
 
         try:
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(
+                timezone.utc
+            )
 
             if (
                 now.weekday() == 6
@@ -1885,6 +2014,7 @@ async def monitor_open_trades():
                 last_price
             )
 
+
             # =================================================
             # BUY
             # =================================================
@@ -1932,6 +2062,7 @@ async def monitor_open_trades():
                         f"\n🎯 BUY TP1 HIT: "
                         f"{symbol}"
                     )
+
 
             # =================================================
             # SELL
@@ -2003,11 +2134,14 @@ async def main():
 
     await init_db()
 
+
     # ========================================================
     # TELEGRAM TEST
     # ========================================================
 
-    telegram_ok = await test_telegram()
+    telegram_ok = (
+        await test_telegram()
+    )
 
     if not telegram_ok:
 
@@ -2022,6 +2156,7 @@ async def main():
 
         return
 
+
     # ========================================================
     # WEEKLY REPORT
     # ========================================================
@@ -2030,7 +2165,9 @@ async def main():
         schedule_weekly_report()
     )
 
+
     symbols = []
+
 
     # ========================================================
     # LOAD SYMBOLS
@@ -2055,42 +2192,49 @@ async def main():
                 5
             )
 
+
+    # ========================================================
+    # START MESSAGE
+    # ========================================================
+
     print(
         "\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚀 JK ANALYZING SCANNER ACTIVE\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 Top {len(symbols)} USDT Pairs\n\n"
+
         "1H EMA50 + CCI\n"
         "   ↓\n"
         "Liquidity Sweep\n"
         "   ↓\n"
-        "5M CHoCH\n"
+        "5M Major CHoCH\n"
         "   ↓\n"
-        "Displacement\n"
+        "Strong Body Break\n"
         "   ↓\n"
         "FVG OR Order Block\n"
         "   ↓\n"
-        "Current Closed Candle Retest\n"
+        "5M CHoCH Retest\n"
         "   ↓\n"
-        "Rejection\n"
+        "Closed Candle Rejection\n"
         "   ↓\n"
-        "🎯 SIGNAL\n"
+        "🎯 SIGNAL\n\n"
+
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🟢 Closed Candle Only\n"
         "🛑 Protected SL\n"
         "🎯 TP1 1:1.5\n"
         "🚀 TP2 1:2.5\n"
+        "📊 Dynamic TradingView Link\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
+
 
     # ========================================================
     # CONTINUOUS SCANNER
     # ========================================================
 
     while True:
-
-        # Cycle statistics
 
         stats = {
             "scanned": 0,
@@ -2110,6 +2254,7 @@ async def main():
 
             total = len(symbols)
 
+
             # =================================================
             # SCAN ALL SYMBOLS
             # =================================================
@@ -2120,7 +2265,9 @@ async def main():
             ):
 
                 clean_name = (
-                    get_clean_symbol(symbol)
+                    get_clean_symbol(
+                        symbol
+                    )
                 )
 
                 print(
@@ -2149,6 +2296,7 @@ async def main():
                     if df_1h is None:
                         continue
 
+
                     # =========================================
                     # 5M
                     # =========================================
@@ -2163,6 +2311,7 @@ async def main():
 
                     if df_5m is None:
                         continue
+
 
                     # =========================================
                     # 1H BIAS
@@ -2192,6 +2341,7 @@ async def main():
 
                         continue
 
+
                     # =========================================
                     # 5M SETUP
                     # =========================================
@@ -2210,6 +2360,7 @@ async def main():
                         )
                     )
 
+
                     # =========================================
                     # VALID SIGNAL
                     # =========================================
@@ -2227,6 +2378,7 @@ async def main():
                             f"{setup_id}"
                         )
 
+
                         # =====================================
                         # DUPLICATE PROTECTION
                         # =====================================
@@ -2238,10 +2390,12 @@ async def main():
 
                             continue
 
+
                         # Mark before Telegram
                         sent_setup_ids.add(
                             full_setup_id
                         )
+
 
                         try:
 
@@ -2258,7 +2412,6 @@ async def main():
 
                         except Exception as e:
 
-                            # Allow retry if broadcast failed
                             sent_setup_ids.discard(
                                 full_setup_id
                             )
@@ -2269,7 +2422,10 @@ async def main():
                                 f"{clean_name}: {e}"
                             )
 
-                    # Small rate-limit protection
+
+                    # =========================================
+                    # RATE LIMIT PROTECTION
+                    # =========================================
 
                     await asyncio.sleep(
                         0.15
@@ -2283,6 +2439,7 @@ async def main():
                     )
 
                     continue
+
 
             # =================================================
             # CYCLE COMPLETE
@@ -2340,6 +2497,7 @@ async def main():
                 f"{SCAN_DELAY}s..."
             )
 
+
         except Exception as e:
 
             print(
@@ -2349,6 +2507,7 @@ async def main():
             await asyncio.sleep(
                 5
             )
+
 
         # ====================================================
         # NEXT SCAN
