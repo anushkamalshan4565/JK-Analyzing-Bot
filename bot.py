@@ -161,11 +161,11 @@ def analyze_1h_indicators(df_1h):
 
 
 # ============================================================
-# VALID 5M SMC CHoCH + RETEST
+# STRICT SMC MAJOR CHoCH + RETEST LOGIC
 # ============================================================
 
 def check_5m_choch_and_retest(df_5m, bias_1h):
-    if df_5m is None or len(df_5m) < 30:
+    if df_5m is None or len(df_5m) < 40:
         return None, None, None, None, None
 
     highs = df_5m['high'].values
@@ -175,175 +175,112 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
 
     current_idx = len(df_5m) - 1
 
+    # Major Swing Points පමණක් ලබා ගැනීම (Internal Noise මඟහැරීම සඳහා 3-bar confirmation)
     swing_highs = []
     swing_lows = []
 
-    for i in range(2, current_idx - 1):
-        if (
-            highs[i] > highs[i - 1]
-            and highs[i] > highs[i + 1]
-        ):
+    for i in range(3, current_idx - 2):
+        if all(highs[i] > highs[i - k] for k in range(1, 4)) and all(highs[i] > highs[i + k] for k in range(1, 4)):
             swing_highs.append(i)
 
-        if (
-            lows[i] < lows[i - 1]
-            and lows[i] < lows[i + 1]
-        ):
+        if all(lows[i] < lows[i - k] for k in range(1, 4)) and all(lows[i] < lows[i + k] for k in range(1, 4)):
             swing_lows.append(i)
 
-    # 1. BULLISH VALID CHoCH
+    # 1. BULLISH VALID CHoCH (Downtrend to Uptrend)
     if bias_1h == "BULLISH":
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
+        if len(swing_highs) < 1 or len(swing_lows) < 1:
             return None, None, None, None, None
 
-        for h_pos in range(len(swing_highs) - 1, 0, -1):
-            previous_high_idx = swing_highs[h_pos - 1]
-            lh_idx = swing_highs[h_pos]
+        # Lowest Low (LL) සෙවීම (පසුගිය candles 30 තුළ)
+        ll_idx = None
+        min_low = float('inf')
+        for idx in swing_lows:
+            if idx > current_idx - 30 and lows[idx] < min_low:
+                min_low = lows[idx]
+                ll_idx = idx
 
-            if highs[lh_idx] >= highs[previous_high_idx]:
-                continue
+        if ll_idx is None:
+            return None, None, None, None, None
 
-            lows_between = [
-                x for x in swing_lows
-                if previous_high_idx < x < lh_idx
-            ]
+        # LL එකට පෙර පැවති නියම Recent Lower High (LH) සෙවීම
+        valid_lh_indices = [idx for idx in swing_highs if idx < ll_idx]
+        if not valid_lh_indices:
+            return None, None, None, None, None
 
-            if not lows_between:
-                continue
+        lh_idx = valid_lh_indices[-1]
+        choch_level = highs[lh_idx]
 
-            current_ll_idx = lows_between[-1]
+        # LL එකට පසුව Candle BODY එකකින් එම LH එක කඩාගෙන ඉහළට Close වී ඇත්දැයි බැලීම
+        breakout_idx = None
+        for k in range(ll_idx + 1, current_idx):
+            if closes[k] > choch_level and closes[k] > opens[k]:
+                breakout_idx = k
+                break
 
-            previous_lows = [
-                x for x in swing_lows
-                if x < previous_high_idx
-            ]
-
-            if not previous_lows:
-                continue
-
-            previous_low_idx = previous_lows[-1]
-
-            if lows[current_ll_idx] >= lows[previous_low_idx]:
-                continue
-
-            choch_level = highs[lh_idx]
-            breakout_idx = None
-
-            for k in range(current_ll_idx + 1, current_idx):
-                if (
-                    closes[k] > choch_level
-                    and closes[k] > opens[k]
-                ):
-                    breakout_idx = k
-                    break
-
-            if breakout_idx is None:
-                continue
-
+        if breakout_idx is not None and current_idx > breakout_idx:
             curr = df_5m.iloc[-1]
+            # Broken LH level එක Retest කිරීම
+            if curr['low'] <= choch_level * 1.0015 and curr['close'] >= choch_level * 0.998:
+                sl_level = df_5m['low'].iloc[-12:].min()
+                sl = round(sl_level * 0.999, 4)
+                entry = round(curr['close'], 4)
+                risk = entry - sl
 
-            if current_idx <= breakout_idx:
-                continue
+                if risk > 0 and (risk / entry) < 0.035:
+                    tp1 = round(entry + (risk * 2), 4)
+                    tp2 = round(entry + (risk * 3.5), 4)
+                    return "BUY", entry, sl, tp1, tp2
 
-            retest_condition = (
-                curr['low'] <= choch_level * 1.0015
-                and curr['close'] >= choch_level * 0.998
-            )
-
-            if not retest_condition:
-                continue
-
-            sl_level = df_5m['low'].iloc[-12:].min()
-            sl = round(sl_level * 0.999, 4)
-            entry = round(curr['close'], 4)
-            risk = entry - sl
-
-            if risk > 0 and (risk / entry) < 0.035:
-                tp1 = round(entry + (risk * 2), 4)
-                tp2 = round(entry + (risk * 3.5), 4)
-                return "BUY", entry, sl, tp1, tp2
-
-            return None, None, None, None, None
-
-    # 2. BEARISH VALID CHoCH
+    # 2. BEARISH VALID CHoCH (Uptrend to Downtrend)
     elif bias_1h == "BEARISH":
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
+        if len(swing_highs) < 1 or len(swing_lows) < 1:
             return None, None, None, None, None
 
-        for l_pos in range(len(swing_lows) - 1, 0, -1):
-            previous_low_idx = swing_lows[l_pos - 1]
-            hl_idx = swing_lows[l_pos]
+        # Highest High (HH) සෙවීම (පසුගිය candles 30 තුළ)
+        hh_idx = None
+        max_high = float('-inf')
+        for idx in swing_highs:
+            if idx > current_idx - 30 and highs[idx] > max_high:
+                max_high = highs[idx]
+                hh_idx = idx
 
-            if lows[hl_idx] <= lows[previous_low_idx]:
-                continue
+        if hh_idx is None:
+            return None, None, None, None, None
 
-            highs_between = [
-                x for x in swing_highs
-                if previous_low_idx < x < hl_idx
-            ]
+        # HH එකට පෙර පැවති නියම Recent Higher Low (HL) සෙවීම
+        valid_hl_indices = [idx for idx in swing_lows if idx < hh_idx]
+        if not valid_hl_indices:
+            return None, None, None, None, None
 
-            if not highs_between:
-                continue
+        hl_idx = valid_hl_indices[-1]
+        choch_level = lows[hl_idx]
 
-            current_hh_idx = highs_between[-1]
+        # HH එකට පසුව Candle BODY එකකින් එම HL එක කඩාගෙන පහළට Close වී ඇත්දැයි බැලීම
+        breakout_idx = None
+        for k in range(hh_idx + 1, current_idx):
+            if closes[k] < choch_level and closes[k] < opens[k]:
+                breakout_idx = k
+                break
 
-            previous_highs = [
-                x for x in swing_highs
-                if x < previous_low_idx
-            ]
-
-            if not previous_highs:
-                continue
-
-            previous_high_idx = previous_highs[-1]
-
-            if highs[current_hh_idx] <= highs[previous_high_idx]:
-                continue
-
-            choch_level = lows[hl_idx]
-            breakout_idx = None
-
-            for k in range(current_hh_idx + 1, current_idx):
-                if (
-                    closes[k] < choch_level
-                    and closes[k] < opens[k]
-                ):
-                    breakout_idx = k
-                    break
-
-            if breakout_idx is None:
-                continue
-
+        if breakout_idx is not None and current_idx > breakout_idx:
             curr = df_5m.iloc[-1]
+            # Broken HL level එක Retest කිරීම
+            if curr['high'] >= choch_level * 0.9985 and curr['close'] <= choch_level * 1.002:
+                sl_level = df_5m['high'].iloc[-12:].max()
+                sl = round(sl_level * 1.001, 4)
+                entry = round(curr['close'], 4)
+                risk = sl - entry
 
-            if current_idx <= breakout_idx:
-                continue
-
-            retest_condition = (
-                curr['high'] >= choch_level * 0.9985
-                and curr['close'] <= choch_level * 1.002
-            )
-
-            if not retest_condition:
-                continue
-
-            sl_level = df_5m['high'].iloc[-12:].max()
-            sl = round(sl_level * 1.001, 4)
-            entry = round(curr['close'], 4)
-            risk = sl - entry
-
-            if risk > 0 and (risk / entry) < 0.035:
-                tp1 = round(entry - (risk * 2), 4)
-                tp2 = round(entry - (risk * 3.5), 4)
-                return "SELL", entry, sl, tp1, tp2
-
-            return None, None, None, None, None
+                if risk > 0 and (risk / entry) < 0.035:
+                    tp1 = round(entry - (risk * 2), 4)
+                    tp2 = round(entry - (risk * 3.5), 4)
+                    return "SELL", entry, sl, tp1, tp2
 
     return None, None, None, None, None
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM BROADCAST
 # ============================================================
 
 async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
@@ -381,7 +318,7 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
 
 
 # ============================================================
-# OPEN TRADE MONITOR (Background Only)
+# TRADE MONITORING (BACKGROUND ONLY - NO TELEGRAM SPAM)
 # ============================================================
 
 async def monitor_open_trades():
@@ -402,11 +339,9 @@ async def monitor_open_trades():
                     await update_trade_tp1(t_id)
 
                 elif last_price >= tp2:
-                    # TP2 Hit -> Trade Closed (Now eligible for new signals)
                     await close_trade(t_id, "CLOSED_PROFIT")
 
                 elif last_price <= sl:
-                    # SL Hit -> Trade Closed (Now eligible for new signals)
                     await close_trade(t_id, "CLOSED_LOSS")
 
             elif side == "SELL":
@@ -414,11 +349,9 @@ async def monitor_open_trades():
                     await update_trade_tp1(t_id)
 
                 elif last_price <= tp2:
-                    # TP2 Hit -> Trade Closed (Now eligible for new signals)
                     await close_trade(t_id, "CLOSED_PROFIT")
 
                 elif last_price >= sl:
-                    # SL Hit -> Trade Closed (Now eligible for new signals)
                     await close_trade(t_id, "CLOSED_LOSS")
 
         except Exception:
@@ -426,7 +359,7 @@ async def monitor_open_trades():
 
 
 # ============================================================
-# MAIN
+# MAIN SCANNER LOOP
 # ============================================================
 
 async def main():
@@ -442,16 +375,16 @@ async def main():
             await asyncio.sleep(5)
 
     print(
-        "🚀 Scanner Active: Accurate 1H SMC + 5M Valid CHoCH "
+        "🚀 Scanner Active: Strict 1H Trend + Major 5M Valid CHoCH "
         "(One Trade per Coin until TP2 or SL Hit)..."
     )
 
     while True:
         try:
-            # 1. Update active trades in background
+            # Open trades පසුබිමෙන් පරීක්ෂා කිරීම
             await monitor_open_trades()
 
-            # 2. Database එකෙන් දැනට ක්‍රියාත්මක වන open trades ඇති කාසි ලැයිස්තුව ලබා ගැනීම
+            # දැනට active වී ඇති කාසි හඳුනාගෙන ඒවාට අලුතින් signal යැවීම වැළැක්වීම
             open_trades = await get_open_trades()
             active_symbols = {trade[1] for trade in open_trades}
 
@@ -464,7 +397,7 @@ async def main():
                     end="\r"
                 )
 
-                # මෙම coin එක දැනටමත් active trade එකක ඇත්නම් (TP2 හෝ SL නොවී), scan කිරීම මඟහරින්න
+                # මෙම coin එක දැනටමත් active trade එකක් නම් scan කිරීම මඟහරින්න
                 if symbol in active_symbols:
                     continue
 
@@ -493,7 +426,6 @@ async def main():
                                     tp1,
                                     tp2
                                 )
-                                # Signal එක යැවූ වහාම active_symbols එකට එකතු කිරීම
                                 active_symbols.add(symbol)
 
                     await asyncio.sleep(0.3)
@@ -514,7 +446,7 @@ async def main():
 
 
 # ============================================================
-# START
+# START SCRIPT
 # ============================================================
 
 if __name__ == "__main__":
