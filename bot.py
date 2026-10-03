@@ -19,21 +19,10 @@ from database import (
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATIONS
 # ============================================================
 
-# IMPORTANT:
-# Generate a NEW Telegram token because the previous token
-# was exposed publicly.
-#
-# Windows CMD:
-# set TELEGRAM_BOT_TOKEN=YOUR_NEW_TOKEN
-#
-# PowerShell:
-# $env:TELEGRAM_BOT_TOKEN="YOUR_NEW_TOKEN"
-
-TELEGRAM_BOT_TOKEN = os.getenv("8983892388:AAG5rvlx_b0C6hIKkElHuQVs5ZlW2Vw89GI")
-
+TELEGRAM_BOT_TOKEN = "8983892388:AAG5rvlx_b0C6hIKkElHuQVs5ZlW2Vw89GI"
 TELEGRAM_CHAT_ID = "-1004306671705"
 
 
