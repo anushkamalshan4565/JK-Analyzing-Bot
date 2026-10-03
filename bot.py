@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 
 import ccxt.async_support as ccxt
 import pandas as pd
@@ -19,10 +19,21 @@ from database import (
 
 
 # ============================================================
-# CONFIGURATIONS
+# CONFIGURATION
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = "8983892388:AAG5rvlx_b0C6hIKkElHuQVs5ZlW2Vw89GI"
+# IMPORTANT:
+# Generate a NEW Telegram token if your previous token
+# was exposed publicly.
+#
+# Windows CMD:
+# set TELEGRAM_BOT_TOKEN=YOUR_NEW_TOKEN
+#
+# PowerShell:
+# $env:TELEGRAM_BOT_TOKEN="YOUR_NEW_TOKEN"
+
+TELEGRAM_BOT_TOKEN = os.getenv("8983892388:AAG5rvlx_b0C6hIKkElHuQVs5ZlW2Vw89GI")
+
 TELEGRAM_CHAT_ID = "-1004306671705"
 
 
@@ -84,12 +95,6 @@ TP2_R = 2.5
 # DUPLICATE SETUP PROTECTION
 # ============================================================
 
-# Stores setup IDs already signaled during this bot session.
-#
-# IMPORTANT:
-# This does NOT block a symbol while a trade is open.
-# Only the exact same setup is blocked.
-
 sent_setup_ids = set()
 
 
@@ -98,6 +103,7 @@ sent_setup_ids = set()
 # ============================================================
 
 def calculate_ema(series, length):
+
     return series.ewm(
         span=length,
         adjust=False
@@ -184,10 +190,13 @@ async def get_top_symbols():
             )
 
             try:
+
                 quote_volume = float(
                     quote_volume
                 )
+
             except Exception:
+
                 quote_volume = 0
 
             if quote_volume <= 0:
@@ -334,7 +343,7 @@ def analyze_1h_indicators(df_1h):
         7
     )
 
-    # Last closed candle
+    # Last CLOSED 1H candle
     last = df.iloc[-2]
 
     recent_cci7 = (
@@ -362,12 +371,12 @@ def analyze_1h_indicators(df_1h):
         and
 
         recent_cci7.min()
-        < -80
+        < -50
 
         and
 
         last["CCI7"]
-        > -20
+        > -30
     )
 
     # ========================================================
@@ -387,12 +396,12 @@ def analyze_1h_indicators(df_1h):
         and
 
         recent_cci7.max()
-        > 80
+        > 50
 
         and
 
         last["CCI7"]
-        < 20
+        < 30
     )
 
     if bullish:
@@ -569,10 +578,7 @@ def find_bullish_fvg(
         end_idx + 1
     ):
 
-        # Bullish FVG:
-        #
-        # current low > high of candle i-2
-
+        # Bullish FVG
         if lows[i] > highs[i - 2]:
 
             zones.append(
@@ -602,10 +608,7 @@ def find_bearish_fvg(
         end_idx + 1
     ):
 
-        # Bearish FVG:
-        #
-        # current high < low of candle i-2
-
+        # Bearish FVG
         if highs[i] < lows[i - 2]:
 
             zones.append(
@@ -635,9 +638,15 @@ def find_bullish_order_block(
 
     # Last bearish candle before bullish breakout
 
+    start = breakout_idx - 1
+    stop = max(
+        -1,
+        breakout_idx - 8
+    )
+
     for i in range(
-        breakout_idx - 1,
-        max(-1, breakout_idx - 8),
+        start,
+        stop,
         -1
     ):
 
@@ -664,9 +673,15 @@ def find_bearish_order_block(
 
     # Last bullish candle before bearish breakout
 
+    start = breakout_idx - 1
+    stop = max(
+        -1,
+        breakout_idx - 8
+    )
+
     for i in range(
-        breakout_idx - 1,
-        max(-1, breakout_idx - 8),
+        start,
+        stop,
         -1
     ):
 
@@ -693,6 +708,12 @@ def price_touches_zone(
     tolerance=0.0015
 ):
 
+    if zone_low > zone_high:
+        zone_low, zone_high = (
+            zone_high,
+            zone_low
+        )
+
     expanded_low = (
         zone_low
         * (1 - tolerance)
@@ -711,7 +732,7 @@ def price_touches_zone(
 
 
 # ============================================================
-# 5M CHoCH + SWEEP + FVG + OB + RETEST
+# 5M CHoCH + SWEEP + FVG/OB + RETEST
 # ============================================================
 
 def check_5m_choch_and_retest(
@@ -727,33 +748,27 @@ def check_5m_choch_and_retest(
     3. Liquidity sweep
     4. Strong CHoCH body break
     5. Displacement
-    6. FVG
-    7. Order Block
-    8. CHoCH + FVG + OB retest
-    9. Rejection candle
-    10. Protected SL
-    11. TP1 / TP2
+    6. FVG OR Order Block
+    7. CURRENT CLOSED CANDLE retest
+    8. Rejection candle
+    9. Protected SL
+    10. TP1 / TP2
     """
 
+    empty_result = (
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
     if df_5m is None:
-        return (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return empty_result
 
     if len(df_5m) < 80:
-        return (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return empty_result
 
     # ========================================================
     # REMOVE CURRENT FORMING CANDLE
@@ -767,14 +782,7 @@ def check_5m_choch_and_retest(
     )
 
     if len(df) < 70:
-        return (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return empty_result
 
     current_idx = len(df) - 1
 
@@ -800,15 +808,7 @@ def check_5m_choch_and_retest(
         or
         len(swing_lows) < 2
     ):
-
-        return (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return empty_result
 
     recent_highs = [
         i
@@ -827,15 +827,7 @@ def check_5m_choch_and_retest(
         or
         len(recent_lows) < 2
     ):
-
-        return (
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        return empty_result
 
     # ========================================================
     # BEARISH SETUP
@@ -852,14 +844,7 @@ def check_5m_choch_and_retest(
         ]
 
         if not previous_lows:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         hl_idx = previous_lows[-1]
 
@@ -876,34 +861,24 @@ def check_5m_choch_and_retest(
             current_idx - STRUCTURE_LOOKBACK
         )
 
+        # Don't use the current closed candle as sweep
+        # because it must become the retest/rejection candle.
         sweep_end = current_idx - 2
 
         if sweep_end <= sweep_start:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
-        sweep_idx = detect_bearish_liquidity_sweep(
-            df,
-            sweep_start,
-            sweep_end,
-            protected_high
+        sweep_idx = (
+            detect_bearish_liquidity_sweep(
+                df,
+                sweep_start,
+                sweep_end,
+                protected_high
+            )
         )
 
         if sweep_idx is None:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         # ====================================================
         # CHoCH BREAK
@@ -918,7 +893,7 @@ def check_5m_choch_and_retest(
 
         for k in range(
             search_start,
-            current_idx + 1
+            current_idx
         ):
 
             body_ratio = candle_body_ratio(
@@ -949,14 +924,7 @@ def check_5m_choch_and_retest(
                     break
 
         if breakout_idx is None:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         # ====================================================
         # FVG
@@ -964,40 +932,37 @@ def check_5m_choch_and_retest(
 
         fvg_zones = find_bearish_fvg(
             df,
-            max(2, breakout_idx - 5),
+            max(
+                2,
+                breakout_idx - 5
+            ),
             breakout_idx
         )
 
-        if not fvg_zones:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-
-        fvg = fvg_zones[-1]
+        fvg = (
+            fvg_zones[-1]
+            if fvg_zones
+            else None
+        )
 
         # ====================================================
         # ORDER BLOCK
         # ====================================================
 
-        order_block = find_bearish_order_block(
-            df,
-            breakout_idx
+        order_block = (
+            find_bearish_order_block(
+                df,
+                breakout_idx
+            )
         )
 
-        if order_block is None:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+        # At least ONE zone must exist.
+        if (
+            fvg is None
+            and
+            order_block is None
+        ):
+            return empty_result
 
         # ====================================================
         # RETEST WINDOW
@@ -1009,50 +974,51 @@ def check_5m_choch_and_retest(
         )
 
         if bars_after_break < 1:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         if bars_after_break > RETEST_MAX_BARS:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         # ====================================================
-        # RETEST
+        # ONLY CURRENT CLOSED CANDLE
         # ====================================================
 
-        for r in range(
-            breakout_idx + 1,
-            current_idx + 1
-        ):
+        r = current_idx
 
-            retest_high = highs[r]
-            retest_low = lows[r]
+        retest_high = highs[r]
+        retest_low = lows[r]
 
-            retest_open = opens[r]
-            retest_close = closes[r]
+        retest_open = opens[r]
+        retest_close = closes[r]
 
-            # CHoCH level touch
-            choch_touch = price_touches_zone(
-                retest_high,
-                retest_low,
-                choch_level,
-                choch_level,
-                RETEST_TOLERANCE
-            )
+        # ====================================================
+        # CHoCH RETEST
+        # ====================================================
 
-            # FVG touch
+        choch_touch = price_touches_zone(
+            retest_high,
+            retest_low,
+            choch_level,
+            choch_level,
+            RETEST_TOLERANCE
+        )
+
+        if not choch_touch:
+            return empty_result
+
+        # ====================================================
+        # FVG / OB RETEST
+        #
+        # IMPORTANT:
+        # FVG OR OB
+        # NOT FVG AND OB
+        # ====================================================
+
+        fvg_touch = False
+        ob_touch = False
+
+        if fvg is not None:
+
             fvg_touch = price_touches_zone(
                 retest_high,
                 retest_low,
@@ -1061,7 +1027,8 @@ def check_5m_choch_and_retest(
                 RETEST_TOLERANCE
             )
 
-            # OB touch
+        if order_block is not None:
+
             ob_touch = price_touches_zone(
                 retest_high,
                 retest_low,
@@ -1070,129 +1037,126 @@ def check_5m_choch_and_retest(
                 RETEST_TOLERANCE
             )
 
-            if not choch_touch:
-                continue
+        if not (
+            fvg_touch
+            or
+            ob_touch
+        ):
+            return empty_result
 
-            # Require FVG + OB confluence
-            if not fvg_touch:
-                continue
+        # ====================================================
+        # BEARISH REJECTION
+        # ====================================================
 
-            if not ob_touch:
-                continue
+        candle_range = (
+            retest_high
+            - retest_low
+        )
 
-            # =================================================
-            # REJECTION
-            # =================================================
+        if candle_range <= 0:
+            return empty_result
 
-            candle_range = (
-                retest_high
-                - retest_low
-            )
+        body = abs(
+            retest_close
+            - retest_open
+        )
 
-            if candle_range <= 0:
-                continue
-
-            body = abs(
-                retest_close
-                - retest_open
-            )
-
-            upper_wick = (
-                retest_high
-                - max(
-                    retest_open,
-                    retest_close
-                )
-            )
-
-            bearish_close = (
-                retest_close
-                < retest_open
-            )
-
-            body_ratio = (
-                body
-                / candle_range
-            )
-
-            rejection = (
-                bearish_close
-                and
-                retest_close
-                < choch_level
-                and
-                body_ratio >= 0.40
-                and
-                upper_wick >= body * 0.30
-            )
-
-            if not rejection:
-                continue
-
-            # =================================================
-            # ENTRY
-            # =================================================
-
-            entry = float(
+        upper_wick = (
+            retest_high
+            - max(
+                retest_open,
                 retest_close
             )
+        )
 
-            # Protected SL
-            structure_sl = (
-                protected_high
-                * 1.0035
-            )
+        bearish_close = (
+            retest_close
+            < retest_open
+        )
 
-            retest_sl = (
-                retest_high
-                * 1.0020
-            )
+        body_ratio = (
+            body
+            / candle_range
+        )
 
-            sl = max(
-                structure_sl,
-                retest_sl
-            )
+        rejection = (
+            bearish_close
+            and
+            retest_close
+            < choch_level
+            and
+            body_ratio >= 0.40
+            and
+            upper_wick >= body * 0.30
+        )
 
-            risk = sl - entry
+        if not rejection:
+            return empty_result
 
-            if risk <= 0:
-                continue
+        # ====================================================
+        # ENTRY
+        # ====================================================
 
-            risk_percent = (
-                risk / entry
-            )
+        entry = float(
+            retest_close
+        )
 
-            if not (
-                MIN_RISK_PERCENT
-                <= risk_percent
-                <= MAX_RISK_PERCENT
-            ):
-                continue
+        # Protected SL
+        structure_sl = (
+            protected_high
+            * 1.0035
+        )
 
-            tp1 = (
-                entry
-                - risk * TP1_R
-            )
+        retest_sl = (
+            retest_high
+            * 1.0020
+        )
 
-            tp2 = (
-                entry
-                - risk * TP2_R
-            )
+        sl = max(
+            structure_sl,
+            retest_sl
+        )
 
-            setup_id = (
-                f"SELL|"
-                f"{int(df.iloc[breakout_idx]['timestamp'])}|"
-                f"{int(df.iloc[r]['timestamp'])}"
-            )
+        risk = sl - entry
 
-            return (
-                "SELL",
-                round(entry, 8),
-                round(sl, 8),
-                round(tp1, 8),
-                round(tp2, 8),
-                setup_id,
-            )
+        if risk <= 0:
+            return empty_result
+
+        risk_percent = (
+            risk / entry
+        )
+
+        if not (
+            MIN_RISK_PERCENT
+            <= risk_percent
+            <= MAX_RISK_PERCENT
+        ):
+            return empty_result
+
+        tp1 = (
+            entry
+            - risk * TP1_R
+        )
+
+        tp2 = (
+            entry
+            - risk * TP2_R
+        )
+
+        setup_id = (
+            f"SELL|"
+            f"{int(df.iloc[breakout_idx]['timestamp'])}|"
+            f"{int(df.iloc[r]['timestamp'])}"
+        )
+
+        return (
+            "SELL",
+            round(entry, 8),
+            round(sl, 8),
+            round(tp1, 8),
+            round(tp2, 8),
+            setup_id,
+        )
 
     # ========================================================
     # BULLISH SETUP
@@ -1209,14 +1173,7 @@ def check_5m_choch_and_retest(
         ]
 
         if not previous_highs:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         lh_idx = previous_highs[-1]
 
@@ -1236,31 +1193,19 @@ def check_5m_choch_and_retest(
         sweep_end = current_idx - 2
 
         if sweep_end <= sweep_start:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
-        sweep_idx = detect_bullish_liquidity_sweep(
-            df,
-            sweep_start,
-            sweep_end,
-            protected_low
+        sweep_idx = (
+            detect_bullish_liquidity_sweep(
+                df,
+                sweep_start,
+                sweep_end,
+                protected_low
+            )
         )
 
         if sweep_idx is None:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         # ====================================================
         # CHoCH BREAK
@@ -1275,7 +1220,7 @@ def check_5m_choch_and_retest(
 
         for k in range(
             search_start,
-            current_idx + 1
+            current_idx
         ):
 
             body_ratio = candle_body_ratio(
@@ -1306,14 +1251,7 @@ def check_5m_choch_and_retest(
                     break
 
         if breakout_idx is None:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         # ====================================================
         # FVG
@@ -1321,40 +1259,37 @@ def check_5m_choch_and_retest(
 
         fvg_zones = find_bullish_fvg(
             df,
-            max(2, breakout_idx - 5),
+            max(
+                2,
+                breakout_idx - 5
+            ),
             breakout_idx
         )
 
-        if not fvg_zones:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-
-        fvg = fvg_zones[-1]
+        fvg = (
+            fvg_zones[-1]
+            if fvg_zones
+            else None
+        )
 
         # ====================================================
         # ORDER BLOCK
         # ====================================================
 
-        order_block = find_bullish_order_block(
-            df,
-            breakout_idx
+        order_block = (
+            find_bullish_order_block(
+                df,
+                breakout_idx
+            )
         )
 
-        if order_block is None:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+        # At least ONE zone must exist.
+        if (
+            fvg is None
+            and
+            order_block is None
+        ):
+            return empty_result
 
         # ====================================================
         # RETEST WINDOW
@@ -1366,50 +1301,50 @@ def check_5m_choch_and_retest(
         )
 
         if bars_after_break < 1:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         if bars_after_break > RETEST_MAX_BARS:
-            return (
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
+            return empty_result
 
         # ====================================================
-        # RETEST
+        # ONLY CURRENT CLOSED CANDLE
         # ====================================================
 
-        for r in range(
-            breakout_idx + 1,
-            current_idx + 1
-        ):
+        r = current_idx
 
-            retest_high = highs[r]
-            retest_low = lows[r]
+        retest_high = highs[r]
+        retest_low = lows[r]
 
-            retest_open = opens[r]
-            retest_close = closes[r]
+        retest_open = opens[r]
+        retest_close = closes[r]
 
-            # CHoCH level
-            choch_touch = price_touches_zone(
-                retest_high,
-                retest_low,
-                choch_level,
-                choch_level,
-                RETEST_TOLERANCE
-            )
+        # ====================================================
+        # CHoCH RETEST
+        # ====================================================
 
-            # FVG
+        choch_touch = price_touches_zone(
+            retest_high,
+            retest_low,
+            choch_level,
+            choch_level,
+            RETEST_TOLERANCE
+        )
+
+        if not choch_touch:
+            return empty_result
+
+        # ====================================================
+        # FVG / OB RETEST
+        #
+        # IMPORTANT:
+        # FVG OR OB
+        # ====================================================
+
+        fvg_touch = False
+        ob_touch = False
+
+        if fvg is not None:
+
             fvg_touch = price_touches_zone(
                 retest_high,
                 retest_low,
@@ -1418,7 +1353,8 @@ def check_5m_choch_and_retest(
                 RETEST_TOLERANCE
             )
 
-            # OB
+        if order_block is not None:
+
             ob_touch = price_touches_zone(
                 retest_high,
                 retest_low,
@@ -1427,141 +1363,132 @@ def check_5m_choch_and_retest(
                 RETEST_TOLERANCE
             )
 
-            if not choch_touch:
-                continue
+        if not (
+            fvg_touch
+            or
+            ob_touch
+        ):
+            return empty_result
 
-            if not fvg_touch:
-                continue
+        # ====================================================
+        # BULLISH REJECTION
+        # ====================================================
 
-            if not ob_touch:
-                continue
+        candle_range = (
+            retest_high
+            - retest_low
+        )
 
-            # =================================================
-            # BULLISH REJECTION
-            # =================================================
+        if candle_range <= 0:
+            return empty_result
 
-            candle_range = (
-                retest_high
-                - retest_low
-            )
+        body = abs(
+            retest_close
+            - retest_open
+        )
 
-            if candle_range <= 0:
-                continue
-
-            body = abs(
-                retest_close
-                - retest_open
-            )
-
-            lower_wick = (
-                min(
-                    retest_open,
-                    retest_close
-                )
-                - retest_low
-            )
-
-            bullish_close = (
-                retest_close
-                > retest_open
-            )
-
-            body_ratio = (
-                body
-                / candle_range
-            )
-
-            rejection = (
-                bullish_close
-                and
-                retest_close
-                > choch_level
-                and
-                body_ratio >= 0.40
-                and
-                lower_wick >= body * 0.30
-            )
-
-            if not rejection:
-                continue
-
-            # =================================================
-            # ENTRY
-            # =================================================
-
-            entry = float(
+        lower_wick = (
+            min(
+                retest_open,
                 retest_close
             )
+            - retest_low
+        )
 
-            # Protected SL
-            structure_sl = (
-                protected_low
-                * 0.9965
-            )
+        bullish_close = (
+            retest_close
+            > retest_open
+        )
 
-            retest_sl = (
-                retest_low
-                * 0.9980
-            )
+        body_ratio = (
+            body
+            / candle_range
+        )
 
-            sl = min(
-                structure_sl,
-                retest_sl
-            )
+        rejection = (
+            bullish_close
+            and
+            retest_close
+            > choch_level
+            and
+            body_ratio >= 0.40
+            and
+            lower_wick >= body * 0.30
+        )
 
-            risk = entry - sl
+        if not rejection:
+            return empty_result
 
-            if risk <= 0:
-                continue
+        # ====================================================
+        # ENTRY
+        # ====================================================
 
-            risk_percent = (
-                risk / entry
-            )
+        entry = float(
+            retest_close
+        )
 
-            if not (
-                MIN_RISK_PERCENT
-                <= risk_percent
-                <= MAX_RISK_PERCENT
-            ):
-                continue
+        # Protected SL
+        structure_sl = (
+            protected_low
+            * 0.9965
+        )
 
-            tp1 = (
-                entry
-                + risk * TP1_R
-            )
+        retest_sl = (
+            retest_low
+            * 0.9980
+        )
 
-            tp2 = (
-                entry
-                + risk * TP2_R
-            )
+        sl = min(
+            structure_sl,
+            retest_sl
+        )
 
-            setup_id = (
-                f"BUY|"
-                f"{int(df.iloc[breakout_idx]['timestamp'])}|"
-                f"{int(df.iloc[r]['timestamp'])}"
-            )
+        risk = entry - sl
 
-            return (
-                "BUY",
-                round(entry, 8),
-                round(sl, 8),
-                round(tp1, 8),
-                round(tp2, 8),
-                setup_id,
-            )
+        if risk <= 0:
+            return empty_result
+
+        risk_percent = (
+            risk / entry
+        )
+
+        if not (
+            MIN_RISK_PERCENT
+            <= risk_percent
+            <= MAX_RISK_PERCENT
+        ):
+            return empty_result
+
+        tp1 = (
+            entry
+            + risk * TP1_R
+        )
+
+        tp2 = (
+            entry
+            + risk * TP2_R
+        )
+
+        setup_id = (
+            f"BUY|"
+            f"{int(df.iloc[breakout_idx]['timestamp'])}|"
+            f"{int(df.iloc[r]['timestamp'])}"
+        )
+
+        return (
+            "BUY",
+            round(entry, 8),
+            round(sl, 8),
+            round(tp1, 8),
+            round(tp2, 8),
+            setup_id,
+        )
 
     # ========================================================
     # NO SIGNAL
     # ========================================================
 
-    return (
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    return empty_result
 
 
 # ============================================================
@@ -1636,11 +1563,9 @@ async def broadcast_signal(
 
         "• 5M Displacement: Confirmed\n"
 
-        "• 5M FVG: Confirmed\n"
+        "• 5M FVG / Order Block: Confirmed\n"
 
-        "• 5M Order Block: Confirmed\n"
-
-        "• 5M Retest: Confirmed\n"
+        "• 5M CHoCH Retest: Confirmed\n"
 
         "• 5M Rejection: Confirmed Closed Candle\n\n"
 
@@ -1686,6 +1611,42 @@ async def broadcast_signal(
         f"TP1={tp1} | "
         f"TP2={tp2}"
     )
+
+
+# ============================================================
+# TELEGRAM CONNECTION TEST
+# ============================================================
+
+async def test_telegram():
+
+    try:
+
+        await tg_bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=(
+                "✅ <b>JK ANALYZING BOT CONNECTED</b>\n\n"
+                "Scanner is now active.\n"
+                "🟢 Closed Candle Only\n"
+                "🛑 Protected SL\n"
+                "🎯 TP1 1:1.5\n"
+                "🚀 TP2 1:2.5"
+            ),
+            parse_mode="HTML",
+        )
+
+        print(
+            "✅ Telegram connection test successful."
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            f"❌ Telegram connection failed: {e}"
+        )
+
+        return False
 
 
 # ============================================================
@@ -1819,7 +1780,7 @@ async def send_weekly_report():
             f"<code>{overall_win_rate}%</code>\n"
 
             f"📅 <i>Report generated on "
-            f"{datetime.utcnow().strftime('%Y-%m-%d')}"
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
             "</i>"
         )
 
@@ -1846,7 +1807,7 @@ async def schedule_weekly_report():
 
         try:
 
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
 
             if (
                 now.weekday() == 6
@@ -1898,6 +1859,8 @@ async def monitor_open_trades():
         return
 
     for trade in trades:
+
+        symbol = "UNKNOWN"
 
         try:
 
@@ -2052,6 +2015,25 @@ async def main():
     await init_db()
 
     # ========================================================
+    # TELEGRAM TEST
+    # ========================================================
+
+    telegram_ok = await test_telegram()
+
+    if not telegram_ok:
+
+        print(
+            "\n❌ Telegram test failed."
+        )
+
+        print(
+            "⚠️ Check TELEGRAM_BOT_TOKEN "
+            "and TELEGRAM_CHAT_ID."
+        )
+
+        return
+
+    # ========================================================
     # WEEKLY REPORT
     # ========================================================
 
@@ -2089,8 +2071,8 @@ async def main():
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚀 JK ANALYZING SCANNER ACTIVE\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Top {len(symbols)} USDT Pairs\n"
-        "1H Bias\n"
+        f"📊 Top {len(symbols)} USDT Pairs\n\n"
+        "1H EMA50 + CCI\n"
         "   ↓\n"
         "Liquidity Sweep\n"
         "   ↓\n"
@@ -2098,11 +2080,9 @@ async def main():
         "   ↓\n"
         "Displacement\n"
         "   ↓\n"
-        "FVG\n"
+        "FVG OR Order Block\n"
         "   ↓\n"
-        "Order Block\n"
-        "   ↓\n"
-        "Retest\n"
+        "Current Closed Candle Retest\n"
         "   ↓\n"
         "Rejection\n"
         "   ↓\n"
@@ -2121,6 +2101,16 @@ async def main():
 
     while True:
 
+        # Cycle statistics
+
+        stats = {
+            "scanned": 0,
+            "bullish": 0,
+            "bearish": 0,
+            "neutral": 0,
+            "signals": 0,
+        }
+
         try:
 
             # =================================================
@@ -2133,9 +2123,6 @@ async def main():
 
             # =================================================
             # SCAN ALL SYMBOLS
-            #
-            # IMPORTANT:
-            # We DO NOT skip symbols with open trades.
             # =================================================
 
             for idx, symbol in enumerate(
@@ -2153,6 +2140,8 @@ async def main():
                     end="\r",
                     flush=True
                 )
+
+                stats["scanned"] += 1
 
                 try:
 
@@ -2196,7 +2185,17 @@ async def main():
                         )
                     )
 
-                    if bias == "NEUTRAL":
+                    if bias == "BULLISH":
+
+                        stats["bullish"] += 1
+
+                    elif bias == "BEARISH":
+
+                        stats["bearish"] += 1
+
+                    else:
+
+                        stats["neutral"] += 1
 
                         await asyncio.sleep(
                             0.10
@@ -2251,7 +2250,6 @@ async def main():
                             continue
 
                         # Mark before Telegram
-                        # to prevent duplicate signals
                         sent_setup_ids.add(
                             full_setup_id
                         )
@@ -2267,10 +2265,11 @@ async def main():
                                 tp2
                             )
 
+                            stats["signals"] += 1
+
                         except Exception as e:
 
-                            # If Telegram/database fails,
-                            # allow retry on next cycle.
+                            # Allow retry if broadcast failed
                             sent_setup_ids.discard(
                                 full_setup_id
                             )
@@ -2282,6 +2281,7 @@ async def main():
                             )
 
                     # Small rate-limit protection
+
                     await asyncio.sleep(
                         0.15
                     )
@@ -2300,7 +2300,49 @@ async def main():
             # =================================================
 
             print(
-                f"\n🔄 Completed scan "
+                "\n\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+
+            print(
+                "📊 SCAN REPORT"
+            )
+
+            print(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+
+            print(
+                f"Pairs scanned : "
+                f"{stats['scanned']}"
+            )
+
+            print(
+                f"🟢 1H Bullish : "
+                f"{stats['bullish']}"
+            )
+
+            print(
+                f"🔴 1H Bearish : "
+                f"{stats['bearish']}"
+            )
+
+            print(
+                f"⚪ 1H Neutral  : "
+                f"{stats['neutral']}"
+            )
+
+            print(
+                f"🚨 Signals     : "
+                f"{stats['signals']}"
+            )
+
+            print(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+
+            print(
+                f"🔄 Completed scan "
                 f"of {total} pairs."
             )
 
