@@ -1,11 +1,12 @@
 import aiosqlite
+from datetime import datetime, timedelta
 
 DB_NAME = "trades.db"
 
 async def init_db():
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS active_trades (
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT,
                 side TEXT,
@@ -14,31 +15,84 @@ async def init_db():
                 tp1 REAL,
                 tp2 REAL,
                 tp1_hit INTEGER DEFAULT 0,
-                status TEXT DEFAULT 'OPEN'
+                status TEXT DEFAULT 'OPEN',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                closed_at TIMESTAMP
             )
-        ''')
+        """)
         await db.commit()
 
 async def save_trade(symbol, side, entry, sl, tp1, tp2):
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('''
-            INSERT INTO active_trades (symbol, side, entry, sl, tp1, tp2)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (symbol, side, entry, sl, tp1, tp2))
+        await db.execute("""
+            INSERT INTO trades (symbol, side, entry, sl, tp1, tp2, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (symbol, side, entry, sl, tp1, tp2, datetime.utcnow()))
         await db.commit()
 
 async def get_open_trades():
     async with aiosqlite.connect(DB_NAME) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM active_trades WHERE status = 'OPEN'") as cursor:
+        async with db.execute("""
+            SELECT id, symbol, side, entry, sl, tp1, tp2, tp1_hit, status 
+            FROM trades 
+            WHERE status = 'OPEN'
+        """) as cursor:
             return await cursor.fetchall()
 
 async def update_trade_tp1(trade_id):
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE active_trades SET tp1_hit = 1 WHERE id = ?", (trade_id,))
+        await db.execute("UPDATE trades SET tp1_hit = 1 WHERE id = ?", (trade_id,))
         await db.commit()
 
 async def close_trade(trade_id, status):
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE active_trades SET status = ? WHERE id = ?", (status, trade_id))
+        await db.execute("""
+            UPDATE trades 
+            SET status = ?, closed_at = ? 
+            WHERE id = ?
+        """, (status, datetime.utcnow(), trade_id))
         await db.commit()
+
+async def get_weekly_performance_data():
+    """
+    පසුගිය දින 7 තුළ දිනපතා Signals, Wins, Losses සහ PnL ගණනය කිරීම
+    """
+    async with aiosqlite.connect(DB_NAME) as db:
+        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        async with db.execute("""
+            SELECT date(created_at), status, tp1_hit 
+            FROM trades 
+            WHERE created_at >= ?
+            ORDER BY created_at ASC
+        """, (seven_days_ago,)) as cursor:
+            rows = await cursor.fetchall()
+
+    daily_stats = {}
+    # පසුගිය දින 7 සඳහා සූදානම් කිරීම
+    for i in range(7):
+        day_date = (seven_days_ago + timedelta(days=i+1)).strftime('%Y-%m-%d')
+        day_name = (seven_days_ago + timedelta(days=i+1)).strftime('%a')
+        daily_stats[day_date] = {
+            'day': day_name,
+            'signals': 0,
+            'wins': 0,
+            'losses': 0,
+            'pnl_r': 0.0
+        }
+
+    for row in rows:
+        d_str, status, tp1_hit = row
+        if d_str in daily_stats:
+            daily_stats[d_str]['signals'] += 1
+            if status == 'CLOSED_PROFIT':
+                daily_stats[d_str]['wins'] += 1
+                daily_stats[d_str]['pnl_r'] += 3.5  # Full TP2 (1:3.5 RR)
+            elif status == 'CLOSED_LOSS':
+                daily_stats[d_str]['losses'] += 1
+                daily_stats[d_str]['pnl_r'] -= 1.0  # SL hit (-1R)
+            elif status == 'OPEN' and tp1_hit:
+                # TP1 hit වී තවමත් Open පවතින විට
+                daily_stats[d_str]['wins'] += 1
+                daily_stats[d_str]['pnl_r'] += 2.0
+
+    return daily_stats
