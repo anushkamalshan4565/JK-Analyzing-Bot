@@ -1,5 +1,5 @@
 import aiosqlite
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 DB_NAME = "trades.db"
 
@@ -24,10 +24,11 @@ async def init_db():
 
 async def save_trade(symbol, side, entry, sl, tp1, tp2):
     async with aiosqlite.connect(DB_NAME) as db:
+        now_utc = datetime.now(timezone.utc)
         await db.execute("""
             INSERT INTO trades (symbol, side, entry, sl, tp1, tp2, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (symbol, side, entry, sl, tp1, tp2, datetime.utcnow()))
+        """, (symbol, side, entry, sl, tp1, tp2, now_utc))
         await db.commit()
 
 async def get_open_trades():
@@ -46,11 +47,12 @@ async def update_trade_tp1(trade_id):
 
 async def close_trade(trade_id, status):
     async with aiosqlite.connect(DB_NAME) as db:
+        now_utc = datetime.now(timezone.utc)
         await db.execute("""
             UPDATE trades 
             SET status = ?, closed_at = ? 
             WHERE id = ?
-        """, (status, datetime.utcnow(), trade_id))
+        """, (status, now_utc, trade_id))
         await db.commit()
 
 async def get_weekly_performance_data():
@@ -58,7 +60,8 @@ async def get_weekly_performance_data():
     පසුගිය දින 7 තුළ දිනපතා Signals, Wins, Losses සහ PnL ගණනය කිරීම
     """
     async with aiosqlite.connect(DB_NAME) as db:
-        seven_days_ago = datetime.utcnow() - timedelta(days=7)
+        now_utc = datetime.now(timezone.utc)
+        seven_days_ago = now_utc - timedelta(days=7)
         async with db.execute("""
             SELECT date(created_at), status, tp1_hit 
             FROM trades 
@@ -68,7 +71,6 @@ async def get_weekly_performance_data():
             rows = await cursor.fetchall()
 
     daily_stats = {}
-    # පසුගිය දින 7 සඳහා සූදානම් කිරීම
     for i in range(7):
         day_date = (seven_days_ago + timedelta(days=i+1)).strftime('%Y-%m-%d')
         day_name = (seven_days_ago + timedelta(days=i+1)).strftime('%a')
@@ -86,13 +88,12 @@ async def get_weekly_performance_data():
             daily_stats[d_str]['signals'] += 1
             if status == 'CLOSED_PROFIT':
                 daily_stats[d_str]['wins'] += 1
-                daily_stats[d_str]['pnl_r'] += 3.5  # Full TP2 (1:3.5 RR)
+                daily_stats[d_str]['pnl_r'] += 2.5  # Full TP2 (1:2.5 RR)
             elif status == 'CLOSED_LOSS':
                 daily_stats[d_str]['losses'] += 1
                 daily_stats[d_str]['pnl_r'] -= 1.0  # SL hit (-1R)
             elif status == 'OPEN' and tp1_hit:
-                # TP1 hit වී තවමත් Open පවතින විට
                 daily_stats[d_str]['wins'] += 1
-                daily_stats[d_str]['pnl_r'] += 2.0
+                daily_stats[d_str]['pnl_r'] += 1.5  # TP1 Partial (1:1.5 RR)
 
     return daily_stats
