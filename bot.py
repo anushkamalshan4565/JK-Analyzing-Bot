@@ -23,13 +23,33 @@ from database import (
 # ============================================================
 
 # IMPORTANT:
-# Put your NEW Telegram BotFather token here.
+# Do NOT hard-code your Telegram bot token.
+# Set it as an environment variable:
+#
+# Windows CMD:
+# set TELEGRAM_BOT_TOKEN=YOUR_NEW_BOT_TOKEN
+#
+# PowerShell:
+# $env:TELEGRAM_BOT_TOKEN="YOUR_NEW_BOT_TOKEN"
+
 TELEGRAM_BOT_TOKEN = os.getenv(
-    "8983892388:AAFYlkhjPwpuuQRX8Iy1oIX47oqv-ipI1tw",
     "8983892388:AAFYlkhjPwpuuQRX8Iy1oIX47oqv-ipI1tw"
 )
 
 TELEGRAM_CHAT_ID = "-1004306671705"
+
+
+# ============================================================
+# TOKEN VALIDATION
+# ============================================================
+
+if not TELEGRAM_BOT_TOKEN:
+
+    raise RuntimeError(
+        "TELEGRAM_BOT_TOKEN environment variable "
+        "is not set. Please add your new Telegram "
+        "BotFather token."
+    )
 
 
 # ============================================================
@@ -44,21 +64,30 @@ bybit = ccxt.bybit({
 })
 
 
-tg_bot = Bot(token=TELEGRAM_BOT_TOKEN)
+tg_bot = Bot(
+    token=TELEGRAM_BOT_TOKEN
+)
 
 
 # ============================================================
 # INDICATOR CALCULATIONS
 # ============================================================
 
-def calculate_ema(series, length):
+def calculate_ema(
+    series,
+    length
+):
+
     return series.ewm(
         span=length,
         adjust=False
     ).mean()
 
 
-def calculate_cci(df, length):
+def calculate_cci(
+    df,
+    length
+):
 
     tp = (
         df["high"]
@@ -94,10 +123,10 @@ def calculate_cci(df, length):
 
 
 # ============================================================
-# GET TOP 75 USDT PAIRS
+# GET TOP 100 USDT PAIRS
 # ============================================================
 
-async def get_top_75_symbols():
+async def get_top_100_symbols():
 
     try:
 
@@ -122,9 +151,10 @@ async def get_top_75_symbols():
                 and market.get("settle") == "USDT"
             ):
 
-                vol = ticker.get(
-                    "quoteVolume"
-                ) or 0
+                vol = (
+                    ticker.get("quoteVolume")
+                    or 0
+                )
 
                 if vol > 0:
 
@@ -133,30 +163,48 @@ async def get_top_75_symbols():
                         "volume": float(vol)
                     })
 
+
+        # ----------------------------------------------------
+        # SORT BY 24H QUOTE VOLUME
+        # ----------------------------------------------------
+
         usdt_pairs.sort(
             key=lambda x: x["volume"],
             reverse=True
         )
 
-        top_75 = [
+
+        # ----------------------------------------------------
+        # TOP 100
+        # ----------------------------------------------------
+
+        top_100 = [
             item["symbol"]
-            for item in usdt_pairs[:75]
+            for item in usdt_pairs[:100]
         ]
 
-        if len(top_75) > 0:
+
+        if len(top_100) > 0:
 
             print(
                 f"✅ Successfully loaded "
-                f"{len(top_75)} Bybit USDT Pairs by Volume!"
+                f"{len(top_100)} Bybit USDT "
+                f"Perpetual Pairs by Volume!"
             )
 
-            return top_75
+            return top_100
+
 
     except Exception as e:
 
         print(
             f"⚠️ Market fetch error: {e}"
         )
+
+
+    # --------------------------------------------------------
+    # FALLBACK
+    # --------------------------------------------------------
 
     return [
         "BTC/USDT:USDT",
@@ -188,8 +236,11 @@ async def fetch_ohlcv(
             }
         )
 
+
         if not raw or len(raw) < 55:
+
             return None
+
 
         df = pd.DataFrame(
             raw,
@@ -203,9 +254,16 @@ async def fetch_ohlcv(
             ]
         )
 
+
         return df
 
-    except Exception:
+
+    except Exception as e:
+
+        print(
+            f"⚠️ OHLCV error "
+            f"{symbol} {timeframe}: {e}"
+        )
 
         return None
 
@@ -214,7 +272,9 @@ async def fetch_ohlcv(
 # 1H TREND / BIAS
 # ============================================================
 
-def analyze_1h_indicators(df_1h):
+def analyze_1h_indicators(
+    df_1h
+):
 
     df_1h["EMA50"] = calculate_ema(
         df_1h["close"],
@@ -231,13 +291,17 @@ def analyze_1h_indicators(df_1h):
         7
     )
 
-    # IMPORTANT:
-    # Use LAST CLOSED 1H candle.
-    last = df_1h.iloc[-2]
 
     # --------------------------------------------------------
-    # BULLISH 1H BIAS
+    # LAST CLOSED 1H CANDLE
     # --------------------------------------------------------
+
+    last = df_1h.iloc[-2]
+
+
+    # ========================================================
+    # BULLISH 1H BIAS
+    # ========================================================
 
     long_condition = (
 
@@ -257,9 +321,10 @@ def analyze_1h_indicators(df_1h):
         < -80
     )
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # BEARISH 1H BIAS
-    # --------------------------------------------------------
+    # ========================================================
 
     short_condition = (
 
@@ -279,13 +344,16 @@ def analyze_1h_indicators(df_1h):
         > 80
     )
 
+
     if long_condition:
 
         return "BULLISH"
 
+
     elif short_condition:
 
         return "BEARISH"
+
 
     return "NEUTRAL"
 
@@ -304,28 +372,21 @@ def check_5m_choch_and_retest(
 
     FLOW:
 
-    1. Use ONLY CLOSED 5M candles
-    2. Detect confirmed swing highs/lows
-    3. Identify structural level
-    4. Require CLOSED candle body breakout
-    5. Require displacement
-    6. Wait for retest
-    7. Require rejection candle
-    8. Calculate protected SL
-    9. Calculate TP1 / TP2
-
-    Returns:
-
-    BUY/SELL
-    Entry
-    SL
-    TP1
-    TP2
+    1. Closed 5M candles only
+    2. Confirmed swing highs/lows
+    3. Structural CHoCH level
+    4. Closed candle body breakout
+    5. Displacement
+    6. Retest
+    7. Rejection candle
+    8. Protected SL
+    9. TP1 / TP2
     """
 
-    # --------------------------------------------------------
+
+    # ========================================================
     # BASIC VALIDATION
-    # --------------------------------------------------------
+    # ========================================================
 
     if df_5m is None:
 
@@ -336,6 +397,7 @@ def check_5m_choch_and_retest(
             None,
             None
         )
+
 
     if len(df_5m) < 80:
 
@@ -352,19 +414,13 @@ def check_5m_choch_and_retest(
     # REMOVE CURRENT FORMING CANDLE
     # ========================================================
 
-    # VERY IMPORTANT
-    #
-    # Bybit's last candle can still be forming.
-    #
-    # We therefore NEVER use df_5m.iloc[-1]
-    # as CHoCH confirmation.
-
     df = df_5m.iloc[:-1].copy()
 
     df.reset_index(
         drop=True,
         inplace=True
     )
+
 
     if len(df) < 70:
 
@@ -401,16 +457,12 @@ def check_5m_choch_and_retest(
 
     STRUCTURE_LOOKBACK = 25
 
-    # CHoCH candle must have strong body
     MIN_BODY_RATIO = 0.55
 
-    # Minimum displacement from structure
     MIN_DISPLACEMENT = 0.0010
 
-    # Retest must happen within 8 closed candles
     RETEST_MAX_BARS = 8
 
-    # 0.15% retest tolerance
     RETEST_TOLERANCE = 0.0015
 
 
@@ -419,6 +471,7 @@ def check_5m_choch_and_retest(
     # ========================================================
 
     swing_highs = []
+
     swing_lows = []
 
 
@@ -426,6 +479,7 @@ def check_5m_choch_and_retest(
         SWING_LEFT,
         len(df) - SWING_RIGHT
     ):
+
 
         # ----------------------------------------------------
         # SWING HIGH
@@ -497,9 +551,9 @@ def check_5m_choch_and_retest(
             swing_lows.append(i)
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # NEED ENOUGH STRUCTURE
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         len(swing_highs) < 2
@@ -525,6 +579,7 @@ def check_5m_choch_and_retest(
         for i in swing_highs
         if i >= current_idx - LOOKBACK
     ]
+
 
     recent_lows = [
         i
@@ -554,6 +609,7 @@ def check_5m_choch_and_retest(
 
     if bias_1h == "BEARISH":
 
+
         # ----------------------------------------------------
         # MOST RECENT CONFIRMED SWING HIGH
         # ----------------------------------------------------
@@ -562,7 +618,7 @@ def check_5m_choch_and_retest(
 
 
         # ----------------------------------------------------
-        # FIND PREVIOUS SWING LOW
+        # PREVIOUS SWING LOW
         # ----------------------------------------------------
 
         previous_lows = [
@@ -586,7 +642,10 @@ def check_5m_choch_and_retest(
         hl_idx = previous_lows[-1]
 
 
-        # This is the CHoCH level
+        # ----------------------------------------------------
+        # CHoCH LEVEL
+        # ----------------------------------------------------
+
         choch_level = lows[hl_idx]
 
 
@@ -607,6 +666,7 @@ def check_5m_choch_and_retest(
             search_start,
             current_idx + 1
         ):
+
 
             candle_range = (
                 highs[k]
@@ -643,10 +703,6 @@ def check_5m_choch_and_retest(
             )
 
 
-            # ------------------------------------------------
-            # STRONG BEARISH CHoCH
-            # ------------------------------------------------
-
             if (
 
                 closes[k]
@@ -665,6 +721,7 @@ def check_5m_choch_and_retest(
 
                 displacement
                 >= MIN_DISPLACEMENT
+
             ):
 
                 breakout_idx = k
@@ -704,10 +761,7 @@ def check_5m_choch_and_retest(
             )
 
 
-        if (
-            bars_after_break
-            > RETEST_MAX_BARS
-        ):
+        if bars_after_break > RETEST_MAX_BARS:
 
             return (
                 None,
@@ -727,8 +781,11 @@ def check_5m_choch_and_retest(
             current_idx + 1
         ):
 
+
             retest_high = highs[r]
+
             retest_close = closes[r]
+
             retest_open = opens[r]
 
 
@@ -753,7 +810,7 @@ def check_5m_choch_and_retest(
 
 
             # ------------------------------------------------
-            # WICK THROUGH LEVEL
+            # WICK THROUGH
             # ------------------------------------------------
 
             wick_retest = (
@@ -800,7 +857,8 @@ def check_5m_choch_and_retest(
 
             upper_wick = (
                 retest_high
-                - max(
+                -
+                max(
                     retest_open,
                     retest_close
                 )
@@ -855,7 +913,10 @@ def check_5m_choch_and_retest(
             )
 
 
-            # Protected SL
+            # ------------------------------------------------
+            # PROTECTED SL
+            # ------------------------------------------------
+
             structure_sl = (
                 highs[hh_idx]
                 * 1.0035
@@ -940,6 +1001,7 @@ def check_5m_choch_and_retest(
 
     elif bias_1h == "BULLISH":
 
+
         # ----------------------------------------------------
         # MOST RECENT CONFIRMED SWING LOW
         # ----------------------------------------------------
@@ -948,7 +1010,7 @@ def check_5m_choch_and_retest(
 
 
         # ----------------------------------------------------
-        # FIND PREVIOUS SWING HIGH
+        # PREVIOUS SWING HIGH
         # ----------------------------------------------------
 
         previous_highs = [
@@ -972,7 +1034,10 @@ def check_5m_choch_and_retest(
         lh_idx = previous_highs[-1]
 
 
-        # CHoCH level
+        # ----------------------------------------------------
+        # CHoCH LEVEL
+        # ----------------------------------------------------
+
         choch_level = highs[lh_idx]
 
 
@@ -993,6 +1058,7 @@ def check_5m_choch_and_retest(
             search_start,
             current_idx + 1
         ):
+
 
             candle_range = (
                 highs[k]
@@ -1029,10 +1095,6 @@ def check_5m_choch_and_retest(
             )
 
 
-            # ------------------------------------------------
-            # STRONG BULLISH CHoCH
-            # ------------------------------------------------
-
             if (
 
                 closes[k]
@@ -1051,6 +1113,7 @@ def check_5m_choch_and_retest(
 
                 displacement
                 >= MIN_DISPLACEMENT
+
             ):
 
                 breakout_idx = k
@@ -1090,10 +1153,7 @@ def check_5m_choch_and_retest(
             )
 
 
-        if (
-            bars_after_break
-            > RETEST_MAX_BARS
-        ):
+        if bars_after_break > RETEST_MAX_BARS:
 
             return (
                 None,
@@ -1113,8 +1173,11 @@ def check_5m_choch_and_retest(
             current_idx + 1
         ):
 
+
             retest_low = lows[r]
+
             retest_close = closes[r]
+
             retest_open = opens[r]
 
 
@@ -1139,7 +1202,7 @@ def check_5m_choch_and_retest(
 
 
             # ------------------------------------------------
-            # WICK THROUGH LEVEL
+            # WICK THROUGH
             # ------------------------------------------------
 
             wick_retest = (
@@ -1241,7 +1304,10 @@ def check_5m_choch_and_retest(
             )
 
 
-            # Protected SL
+            # ------------------------------------------------
+            # PROTECTED SL
+            # ------------------------------------------------
+
             structure_sl = (
                 lows[ll_idx]
                 * 0.9965
@@ -1353,6 +1419,7 @@ async def broadcast_signal(
         ""
     )
 
+
     direction_text = (
         "🟢 LONG"
         if side == "BUY"
@@ -1378,7 +1445,7 @@ async def broadcast_signal(
         f"<b>Direction:</b> "
         f"{direction_text}\n\n"
 
-        f"<b>Conformations Passed:</b>\n"
+        f"<b>Confirmations Passed:</b>\n"
 
         f"• 1H Trend & Momentum: Aligned\n"
 
@@ -1412,6 +1479,10 @@ async def broadcast_signal(
     )
 
 
+    # ========================================================
+    # SEND TELEGRAM
+    # ========================================================
+
     await tg_bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
         text=msg,
@@ -1419,6 +1490,10 @@ async def broadcast_signal(
         disable_web_page_preview=True
     )
 
+
+    # ========================================================
+    # SAVE TRADE
+    # ========================================================
 
     await save_trade(
         symbol,
@@ -1447,16 +1522,21 @@ async def send_weekly_report():
 
 
     total_signals = 0
+
     total_wins = 0
+
     total_losses = 0
+
     total_pnl = 0.0
 
 
     lines = []
 
+
     lines.append(
         "<code>Day | Sigs | W - L | Win% | Net PnL</code>"
     )
+
 
     lines.append(
         "<code>-----------------------------------</code>"
@@ -1475,16 +1555,26 @@ async def send_weekly_report():
 
 
         win_rate = (
-            int((w / sigs) * 100)
+
+            int(
+                (w / sigs)
+                * 100
+            )
+
             if sigs > 0
+
             else 0
         )
 
 
         pnl_str = (
+
             f"+{pnl:.1f}R"
+
             if pnl >= 0
+
             else
+
             f"{pnl:.1f}R"
         )
 
@@ -1499,38 +1589,56 @@ async def send_weekly_report():
 
 
         lines.append(
+
             f"<code>"
+
             f"{stats['day']:<3} | "
+
             f"{sigs:^4} | "
+
             f"{w:^2}-{l:^2} | "
+
             f"{win_rate:>3}% | "
+
             f"{pnl_str:>7}"
+
             f"</code>"
         )
 
 
     overall_win_rate = (
+
         int(
             (total_wins / total_signals)
             * 100
         )
+
         if total_signals > 0
+
         else 0
     )
 
 
     tot_pnl_str = (
+
         f"+{total_pnl:.1f}R"
+
         if total_pnl >= 0
+
         else
+
         f"{total_pnl:.1f}R"
     )
 
 
     status_icon = (
+
         "🟢"
+
         if total_pnl >= 0
+
         else
+
         "🔴"
     )
 
@@ -1541,13 +1649,20 @@ async def send_weekly_report():
 
 
     lines.append(
+
         f"<code>"
+
         f"TOT | "
+
         f"{total_signals:^4} | "
+
         f"{total_wins:^2}-"
         f"{total_losses:^2} | "
+
         f"{overall_win_rate:>3}% | "
+
         f"{tot_pnl_str:>7}"
+
         f"</code>"
     )
 
@@ -1595,12 +1710,21 @@ async def schedule_weekly_report():
 
 
         if (
+
             now.weekday() == 6
-            and now.hour == 23
-            and now.minute >= 55
+
+            and
+
+            now.hour == 23
+
+            and
+
+            now.minute >= 55
+
         ):
 
             await send_weekly_report()
+
 
             await asyncio.sleep(
                 3600
@@ -1655,7 +1779,10 @@ async def monitor_open_trades():
 
             if side == "BUY":
 
-                # SL first
+                # ------------------------------------------------
+                # SL
+                # ------------------------------------------------
+
                 if last_price <= sl:
 
                     await close_trade(
@@ -1663,7 +1790,11 @@ async def monitor_open_trades():
                         "CLOSED_LOSS"
                     )
 
+
+                # ------------------------------------------------
                 # TP2
+                # ------------------------------------------------
+
                 elif last_price >= tp2:
 
                     await close_trade(
@@ -1671,11 +1802,19 @@ async def monitor_open_trades():
                         "CLOSED_PROFIT"
                     )
 
+
+                # ------------------------------------------------
                 # TP1
+                # ------------------------------------------------
+
                 elif (
+
                     not tp1_hit
+
                     and
+
                     last_price >= tp1
+
                 ):
 
                     await update_trade_tp1(
@@ -1689,7 +1828,10 @@ async def monitor_open_trades():
 
             elif side == "SELL":
 
-                # SL first
+                # ------------------------------------------------
+                # SL
+                # ------------------------------------------------
+
                 if last_price >= sl:
 
                     await close_trade(
@@ -1697,7 +1839,11 @@ async def monitor_open_trades():
                         "CLOSED_LOSS"
                     )
 
+
+                # ------------------------------------------------
                 # TP2
+                # ------------------------------------------------
+
                 elif last_price <= tp2:
 
                     await close_trade(
@@ -1705,11 +1851,19 @@ async def monitor_open_trades():
                         "CLOSED_PROFIT"
                     )
 
+
+                # ------------------------------------------------
                 # TP1
+                # ------------------------------------------------
+
                 elif (
+
                     not tp1_hit
+
                     and
+
                     last_price <= tp1
+
                 ):
 
                     await update_trade_tp1(
@@ -1728,16 +1882,16 @@ async def monitor_open_trades():
 
 async def main():
 
-    # --------------------------------------------------------
+    # ========================================================
     # DATABASE
-    # --------------------------------------------------------
+    # ========================================================
 
     await init_db()
 
 
-    # --------------------------------------------------------
+    # ========================================================
     # WEEKLY REPORT
-    # --------------------------------------------------------
+    # ========================================================
 
     asyncio.create_task(
         schedule_weekly_report()
@@ -1748,14 +1902,17 @@ async def main():
 
 
     # ========================================================
-    # LOAD SYMBOLS
+    # LOAD TOP 100 SYMBOLS
     # ========================================================
 
     while not symbols:
 
         try:
 
-            symbols = await get_top_75_symbols()
+            symbols = (
+                await get_top_100_symbols()
+            )
+
 
         except Exception:
 
@@ -1770,10 +1927,17 @@ async def main():
 
 
     print(
+
         "\n🚀 Scanner Active"
+
         "\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
         "\n"
+        "TOP 100 Bybit USDT Perpetual Pairs"
+
+        "\n"
+
         "1H Bias"
         " → "
         "5M CHoCH"
@@ -1783,16 +1947,25 @@ async def main():
         "Retest"
         " → "
         "Rejection"
+
         "\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
         "\n"
         "🟢 Closed-Candle Confirmation"
+
         "\n"
         "🎯 Protected SL"
+
         "\n"
         "📊 TP1 1:1.5"
+
         "\n"
         "🚀 TP2 1:2.5"
+
+        "\n"
+        "🔄 Multiple Signals Allowed"
+
         "\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
@@ -1807,32 +1980,17 @@ async def main():
         try:
 
             # ------------------------------------------------
-            # MONITOR OPEN TRADES
+            # MONITOR EXISTING TRADES
             # ------------------------------------------------
 
             await monitor_open_trades()
-
-
-            # ------------------------------------------------
-            # GET OPEN TRADES
-            # ------------------------------------------------
-
-            open_trades = (
-                await get_open_trades()
-            )
-
-
-            active_symbols = {
-                trade[1]
-                for trade in open_trades
-            }
 
 
             total = len(symbols)
 
 
             # =================================================
-            # SCAN ALL PAIRS
+            # SCAN ALL TOP 100 PAIRS
             # =================================================
 
             for idx, symbol in enumerate(
@@ -1840,33 +1998,40 @@ async def main():
                 1
             ):
 
+
                 clean_name = (
                     symbol.split(":")[0]
                 )
 
 
                 print(
+
                     f"🔍 [{idx}/{total}] "
                     f"Scanning: "
                     f"{clean_name}...",
+
                     end="\r"
                 )
 
 
-                # ------------------------------------------------
-                # SKIP SYMBOL IF TRADE ALREADY OPEN
-                # ------------------------------------------------
-
-                if symbol in active_symbols:
-
-                    continue
+                # =================================================
+                # IMPORTANT:
+                #
+                # NO active_symbols restriction here.
+                #
+                # Therefore:
+                #
+                # Existing trade එක තිබුණත්
+                # new valid signal එකක් detect වුණොත්
+                # Telegram signal යවන්න පුළුවන්.
+                # =================================================
 
 
                 try:
 
-                    # =================================================
+                    # =============================================
                     # FETCH 1H
-                    # =================================================
+                    # =============================================
 
                     df_1h = await fetch_ohlcv(
                         symbol,
@@ -1875,13 +2040,9 @@ async def main():
                     )
 
 
-                    # =================================================
+                    # =============================================
                     # FETCH 5M
-                    #
-                    # IMPORTANT:
-                    # Increased from 60 -> 100
-                    # for better swing structure.
-                    # =================================================
+                    # =============================================
 
                     df_5m = await fetch_ohlcv(
                         symbol,
@@ -1891,14 +2052,19 @@ async def main():
 
 
                     if (
+
                         df_1h is not None
+
                         and
+
                         df_5m is not None
+
                     ):
 
-                        # =================================================
+
+                        # =========================================
                         # 1H BIAS
-                        # =================================================
+                        # =========================================
 
                         bias_1h = (
                             analyze_1h_indicators(
@@ -1907,11 +2073,12 @@ async def main():
                         )
 
 
-                        # =================================================
-                        # ONLY SCAN 5M IF 1H HAS BIAS
-                        # =================================================
+                        # =========================================
+                        # ONLY SCAN 5M IF BIAS EXISTS
+                        # =========================================
 
                         if bias_1h != "NEUTRAL":
+
 
                             (
                                 side,
@@ -1927,34 +2094,41 @@ async def main():
                             )
 
 
-                            # =================================================
+                            # =====================================
                             # VALID SIGNAL
-                            # =================================================
+                            # =====================================
 
                             if (
+
                                 side
+
                                 and
+
                                 entry
+
                             ):
 
                                 await broadcast_signal(
+
                                     symbol,
+
                                     side,
+
                                     entry,
+
                                     sl,
+
                                     tp1,
+
                                     tp2
+
                                 )
 
 
-                                # Prevent duplicate
-                                # signal during same cycle
-                                active_symbols.add(
-                                    symbol
-                                )
+                        # ------------------------------------------------
+                        # SMALL DELAY
+                        # ------------------------------------------------
 
-
-                        # Small delay
                         await asyncio.sleep(
                             0.3
                         )
@@ -1963,8 +2137,10 @@ async def main():
                 except Exception as e:
 
                     print(
+
                         f"\n⚠️ Error scanning "
                         f"{clean_name}: {e}"
+
                     )
 
                     continue
@@ -1975,9 +2151,12 @@ async def main():
             # =================================================
 
             print(
+
                 f"\n🔄 Completed 1 cycle "
                 f"of {total} pairs."
+
             )
+
 
             print(
                 "⏳ Waiting 20s for next cycle..."
@@ -1987,8 +2166,11 @@ async def main():
         except Exception as e:
 
             print(
+
                 f"\n⚠️ Main loop alert: {e}"
+
             )
+
 
             await asyncio.sleep(
                 5
@@ -2015,6 +2197,7 @@ if __name__ == "__main__":
         asyncio.run(
             main()
         )
+
 
     except (
         KeyboardInterrupt,
