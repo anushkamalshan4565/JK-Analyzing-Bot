@@ -80,7 +80,7 @@ async def get_top_75_symbols():
             return top_75
 
     except Exception as e:
-        print(f"⚠️ Market fetch error: {e}")
+        print(f"⚠️️ Market fetch error: {e}")
 
     return [
         "BTC/USDT:USDT",
@@ -161,11 +161,11 @@ def analyze_1h_indicators(df_1h):
 
 
 # ============================================================
-# STRICT SMC MAJOR CHoCH + RETEST LOGIC
+# ACCURATE RECENT SMC CHoCH + RETEST LOGIC
 # ============================================================
 
 def check_5m_choch_and_retest(df_5m, bias_1h):
-    if df_5m is None or len(df_5m) < 40:
+    if df_5m is None or len(df_5m) < 45:
         return None, None, None, None, None
 
     highs = df_5m['high'].values
@@ -175,87 +175,34 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
 
     current_idx = len(df_5m) - 1
 
-    # Major Swing Points පමණක් ලබා ගැනීම (Internal Noise මඟහැරීම සඳහා 3-bar confirmation)
+    # 1. Swing Highs & Lows හඳුනා ගැනීම (Clean fractals)
     swing_highs = []
     swing_lows = []
 
     for i in range(3, current_idx - 2):
         if all(highs[i] > highs[i - k] for k in range(1, 4)) and all(highs[i] > highs[i + k] for k in range(1, 4)):
             swing_highs.append(i)
-
         if all(lows[i] < lows[i - k] for k in range(1, 4)) and all(lows[i] < lows[i + k] for k in range(1, 4)):
             swing_lows.append(i)
 
-    # 1. BULLISH VALID CHoCH (Downtrend to Uptrend)
-    if bias_1h == "BULLISH":
-        if len(swing_highs) < 1 or len(swing_lows) < 1:
+    # BEARISH VALID CHoCH (Top එකේ Reversal එක ගැනීම)
+    if bias_1h == "BEARISH":
+        if not swing_highs or not swing_lows:
             return None, None, None, None, None
 
-        # Lowest Low (LL) සෙවීම (පසුගිය candles 30 තුළ)
-        ll_idx = None
-        min_low = float('inf')
-        for idx in swing_lows:
-            if idx > current_idx - 30 and lows[idx] < min_low:
-                min_low = lows[idx]
-                ll_idx = idx
-
-        if ll_idx is None:
+        recent_sh = [i for i in swing_highs if i > current_idx - 30]
+        if not recent_sh:
             return None, None, None, None, None
 
-        # LL එකට පෙර පැවති නියම Recent Lower High (LH) සෙවීම
-        valid_lh_indices = [idx for idx in swing_highs if idx < ll_idx]
-        if not valid_lh_indices:
+        hh_idx = max(recent_sh, key=lambda x: highs[x])
+
+        valid_hls = [i for i in swing_lows if i < hh_idx and i > hh_idx - 15]
+        if not valid_hls:
             return None, None, None, None, None
 
-        lh_idx = valid_lh_indices[-1]
-        choch_level = highs[lh_idx]
-
-        # LL එකට පසුව Candle BODY එකකින් එම LH එක කඩාගෙන ඉහළට Close වී ඇත්දැයි බැලීම
-        breakout_idx = None
-        for k in range(ll_idx + 1, current_idx):
-            if closes[k] > choch_level and closes[k] > opens[k]:
-                breakout_idx = k
-                break
-
-        if breakout_idx is not None and current_idx > breakout_idx:
-            curr = df_5m.iloc[-1]
-            # Broken LH level එක Retest කිරීම
-            if curr['low'] <= choch_level * 1.0015 and curr['close'] >= choch_level * 0.998:
-                sl_level = df_5m['low'].iloc[-12:].min()
-                sl = round(sl_level * 0.999, 4)
-                entry = round(curr['close'], 4)
-                risk = entry - sl
-
-                if risk > 0 and (risk / entry) < 0.035:
-                    tp1 = round(entry + (risk * 2), 4)
-                    tp2 = round(entry + (risk * 3.5), 4)
-                    return "BUY", entry, sl, tp1, tp2
-
-    # 2. BEARISH VALID CHoCH (Uptrend to Downtrend)
-    elif bias_1h == "BEARISH":
-        if len(swing_highs) < 1 or len(swing_lows) < 1:
-            return None, None, None, None, None
-
-        # Highest High (HH) සෙවීම (පසුගිය candles 30 තුළ)
-        hh_idx = None
-        max_high = float('-inf')
-        for idx in swing_highs:
-            if idx > current_idx - 30 and highs[idx] > max_high:
-                max_high = highs[idx]
-                hh_idx = idx
-
-        if hh_idx is None:
-            return None, None, None, None, None
-
-        # HH එකට පෙර පැවති නියම Recent Higher Low (HL) සෙවීම
-        valid_hl_indices = [idx for idx in swing_lows if idx < hh_idx]
-        if not valid_hl_indices:
-            return None, None, None, None, None
-
-        hl_idx = valid_hl_indices[-1]
+        hl_idx = valid_hls[-1]
         choch_level = lows[hl_idx]
 
-        # HH එකට පසුව Candle BODY එකකින් එම HL එක කඩාගෙන පහළට Close වී ඇත්දැයි බැලීම
         breakout_idx = None
         for k in range(hh_idx + 1, current_idx):
             if closes[k] < choch_level and closes[k] < opens[k]:
@@ -264,9 +211,8 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
 
         if breakout_idx is not None and current_idx > breakout_idx:
             curr = df_5m.iloc[-1]
-            # Broken HL level එක Retest කිරීම
             if curr['high'] >= choch_level * 0.9985 and curr['close'] <= choch_level * 1.002:
-                sl_level = df_5m['high'].iloc[-12:].max()
+                sl_level = df_5m['high'].iloc[-10:].max()
                 sl = round(sl_level * 1.001, 4)
                 entry = round(curr['close'], 4)
                 risk = sl - entry
@@ -276,19 +222,55 @@ def check_5m_choch_and_retest(df_5m, bias_1h):
                     tp2 = round(entry - (risk * 3.5), 4)
                     return "SELL", entry, sl, tp1, tp2
 
+    # BULLISH VALID CHoCH (Bottom එකේ Reversal එක ගැනීම)
+    elif bias_1h == "BULLISH":
+        if not swing_highs or not swing_lows:
+            return None, None, None, None, None
+
+        recent_sl = [i for i in swing_lows if i > current_idx - 30]
+        if not recent_sl:
+            return None, None, None, None, None
+
+        ll_idx = min(recent_sl, key=lambda x: lows[x])
+
+        valid_lhs = [i for i in swing_highs if i < ll_idx and i > ll_idx - 15]
+        if not valid_lhs:
+            return None, None, None, None, None
+
+        lh_idx = valid_lhs[-1]
+        choch_level = highs[lh_idx]
+
+        breakout_idx = None
+        for k in range(ll_idx + 1, current_idx):
+            if closes[k] > choch_level and closes[k] > opens[k]:
+                breakout_idx = k
+                break
+
+        if breakout_idx is not None and current_idx > breakout_idx:
+            curr = df_5m.iloc[-1]
+            if curr['low'] <= choch_level * 1.0015 and curr['close'] >= choch_level * 0.998:
+                sl_level = df_5m['low'].iloc[-10:].min()
+                sl = round(sl_level * 0.999, 4)
+                entry = round(curr['close'], 4)
+                risk = entry - sl
+
+                if risk > 0 and (risk / entry) < 0.035:
+                    tp1 = round(entry + (risk * 2), 4)
+                    tp2 = round(entry + (risk * 3.5), 4)
+                    return "BUY", entry, sl, tp1, tp2
+
     return None, None, None, None, None
 
 
 # ============================================================
-# TELEGRAM BROADCAST
+# TELEGRAM BROADCAST (WITH TRADINGVIEW LINK)
 # ============================================================
 
 async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
     pair_display = symbol.split(':')[0]
     clean_pair = pair_display.replace('/', '')
     direction_text = "🟢 LONG" if side == "BUY" else "🔴 SHORT"
-    
-    # TradingView Direct Chart Link (Bybit Futures)
+
     tv_chart_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{clean_pair}.P"
 
     msg = (
@@ -324,7 +306,7 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
 
 
 # ============================================================
-# TRADE MONITORING (BACKGROUND ONLY - NO TELEGRAM SPAM)
+# OPEN TRADE MONITOR (Background Only)
 # ============================================================
 
 async def monitor_open_trades():
@@ -381,16 +363,14 @@ async def main():
             await asyncio.sleep(5)
 
     print(
-        "🚀 Scanner Active: Strict 1H Trend + Major 5M Valid CHoCH "
+        "🚀 Scanner Active: Strict 1H Trend + Recent 5M Valid CHoCH "
         "(One Trade per Coin until TP2 or SL Hit)..."
     )
 
     while True:
         try:
-            # Open trades පසුබිමෙන් පරීක්ෂා කිරීම
             await monitor_open_trades()
 
-            # දැනට active වී ඇති කාසි හඳුනාගෙන ඒවාට අලුතින් signal යැවීම වැළැක්වීම
             open_trades = await get_open_trades()
             active_symbols = {trade[1] for trade in open_trades}
 
@@ -403,7 +383,6 @@ async def main():
                     end="\r"
                 )
 
-                # මෙම coin එක දැනටමත් active trade එකක් නම් scan කිරීම මඟහරින්න
                 if symbol in active_symbols:
                     continue
 
@@ -452,7 +431,7 @@ async def main():
 
 
 # ============================================================
-# START SCRIPT
+# START
 # ============================================================
 
 if __name__ == "__main__":
