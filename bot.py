@@ -8,8 +8,9 @@ from telegram import Bot
 from database import init_db, save_trade, get_open_trades, update_trade_tp1, close_trade
 
 # --- Configurations ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8983892388:AAFs6EgNNj5uqPNfUmn6Qap3kZAzNGq6IYM")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1004306671705")
+TELEGRAM_BOT_TOKEN = "8983892388:AAFs6EgNNj5uqPNfUmn6Qap3kZAzNGq6IYM"
+TELEGRAM_CHAT_ID = "-1004306671705"
+
 bybit = ccxt.bybit({
     'enableRateLimit': True,
     'options': {
