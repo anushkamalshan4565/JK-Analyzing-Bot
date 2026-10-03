@@ -557,7 +557,7 @@ async def broadcast_signal(
     )
 
     msg = (
-        f"🚨 <b>VALID SMC CHoCH SIGNAL</b> 🚨\n\n"
+        f"🚨 <b>JK Analyzing</b> 🚨\n\n"
         f"<b>Exchange:</b> Bybit Futures\n"
         f"<b>Pair:</b> #{pair_display.replace('/', '')}\n"
         f"<b>Direction:</b> {direction_text}\n\n"
