@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime
 
 import ccxt.async_support as ccxt
 import pandas as pd
@@ -14,21 +14,28 @@ from database import (
     get_open_trades,
     update_trade_tp1,
     close_trade,
-    get_weekly_performance_data
+    get_weekly_performance_data,
 )
 
 
 # ============================================================
-# CONFIGURATIONS
+# CONFIGURATION
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = "8983892388:AAFjwABLqLR6tvEtHHD2CUuF2r8x90JMU-w"
+# IMPORTANT:
+# Generate a NEW Telegram token because the previous token
+# was exposed publicly.
+#
+# Windows CMD:
+# set TELEGRAM_BOT_TOKEN=YOUR_NEW_TOKEN
+#
+# PowerShell:
+# $env:TELEGRAM_BOT_TOKEN="YOUR_NEW_TOKEN"
+
+TELEGRAM_BOT_TOKEN = os.getenv("8983892388:AAG5rvlx_b0C6hIKkElHuQVs5ZlW2Vw89GI")
+
 TELEGRAM_CHAT_ID = "-1004306671705"
 
-
-# ============================================================
-# TOKEN VALIDATION
-# ============================================================
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError(
@@ -40,79 +47,202 @@ if not TELEGRAM_BOT_TOKEN:
 # BYBIT
 # ============================================================
 
-bybit = ccxt.bybit({
-    "enableRateLimit": True,
-    "options": {
-        "defaultType": "linear"
+bybit = ccxt.bybit(
+    {
+        "enableRateLimit": True,
+        "options": {
+            "defaultType": "linear",
+        },
     }
-})
+)
+
 
 tg_bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
 
 # ============================================================
-# INDICATOR CALCULATIONS
+# SCANNER SETTINGS
+# ============================================================
+
+TOP_SYMBOLS = 100
+
+OHLCV_1H_LIMIT = 100
+OHLCV_5M_LIMIT = 150
+
+SCAN_DELAY = 20
+
+SWING_LEFT = 3
+SWING_RIGHT = 3
+
+STRUCTURE_LOOKBACK = 40
+
+MIN_BODY_RATIO = 0.55
+
+MIN_DISPLACEMENT = 0.0010
+
+RETEST_MAX_BARS = 8
+
+RETEST_TOLERANCE = 0.0015
+
+MIN_RISK_PERCENT = 0.0025
+MAX_RISK_PERCENT = 0.035
+
+TP1_R = 1.5
+TP2_R = 2.5
+
+
+# ============================================================
+# DUPLICATE SETUP PROTECTION
+# ============================================================
+
+# Stores setup IDs already signaled during this bot session.
+#
+# IMPORTANT:
+# This does NOT block a symbol while a trade is open.
+# Only the exact same setup is blocked.
+
+sent_setup_ids = set()
+
+
+# ============================================================
+# EMA
 # ============================================================
 
 def calculate_ema(series, length):
-    return series.ewm(span=length, adjust=False).mean()
+    return series.ewm(
+        span=length,
+        adjust=False
+    ).mean()
 
+
+# ============================================================
+# CCI
+# ============================================================
 
 def calculate_cci(df, length):
-    tp = (df["high"] + df["low"] + df["close"]) / 3
-    sma = tp.rolling(window=length).mean()
-    mad = tp.rolling(window=length).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x)))
+
+    typical_price = (
+        df["high"]
+        + df["low"]
+        + df["close"]
+    ) / 3.0
+
+    sma = typical_price.rolling(
+        window=length
+    ).mean()
+
+    mad = typical_price.rolling(
+        window=length
+    ).apply(
+        lambda x: np.mean(
+            np.abs(
+                x - np.mean(x)
+            )
+        ),
+        raw=True,
     )
-    mad = mad.replace(0, 0.00001)
-    cci = (tp - sma) / (0.015 * mad)
+
+    mad = mad.replace(
+        0,
+        0.00001
+    )
+
+    cci = (
+        (typical_price - sma)
+        / (0.015 * mad)
+    )
+
     return cci
 
 
 # ============================================================
-# GET TOP 100 USDT PAIRS
+# GET TOP 100 USDT PERPETUAL PAIRS
 # ============================================================
 
-async def get_top_100_symbols():
+async def get_top_symbols():
+
     try:
+
         markets = await bybit.load_markets()
-        tickers = await bybit.fetch_tickers(params={"category": "linear"})
+
+        tickers = await bybit.fetch_tickers(
+            params={
+                "category": "linear"
+            }
+        )
+
         usdt_pairs = []
 
         for symbol, ticker in tickers.items():
+
             market = markets.get(symbol)
-            if (
-                market
-                and market.get("linear")
-                and market.get("contract")
-                and market.get("settle") == "USDT"
-            ):
-                vol = ticker.get("quoteVolume") or 0
-                if vol > 0:
-                    usdt_pairs.append({
-                        "symbol": symbol,
-                        "volume": float(vol)
-                    })
 
-        usdt_pairs.sort(key=lambda x: x["volume"], reverse=True)
-        top_100 = [item["symbol"] for item in usdt_pairs[:100]]
+            if not market:
+                continue
 
-        if len(top_100) > 0:
-            print(
-                f"✅ Successfully loaded {len(top_100)} Bybit USDT Perpetual Pairs by Volume!",
-                flush=True
+            if not market.get("linear"):
+                continue
+
+            if not market.get("contract"):
+                continue
+
+            if market.get("settle") != "USDT":
+                continue
+
+            quote_volume = (
+                ticker.get("quoteVolume")
+                or 0
             )
-            return top_100
+
+            try:
+                quote_volume = float(
+                    quote_volume
+                )
+            except Exception:
+                quote_volume = 0
+
+            if quote_volume <= 0:
+                continue
+
+            usdt_pairs.append(
+                {
+                    "symbol": symbol,
+                    "volume": quote_volume,
+                }
+            )
+
+        usdt_pairs.sort(
+            key=lambda x: x["volume"],
+            reverse=True
+        )
+
+        top_symbols = [
+            item["symbol"]
+            for item in usdt_pairs[:TOP_SYMBOLS]
+        ]
+
+        if top_symbols:
+
+            print(
+                f"✅ Loaded "
+                f"{len(top_symbols)} "
+                f"Bybit USDT perpetual pairs."
+            )
+
+            return top_symbols
 
     except Exception as e:
-        print(f"⚠️ Market fetch error: {e}", flush=True)
+
+        print(
+            f"⚠️ Market fetch error: {e}"
+        )
 
     return [
         "BTC/USDT:USDT",
         "ETH/USDT:USDT",
         "SOL/USDT:USDT",
         "XRP/USDT:USDT",
-        "DOGE/USDT:USDT"
+        "DOGE/USDT:USDT",
     ]
 
 
@@ -120,25 +250,69 @@ async def get_top_100_symbols():
 # FETCH OHLCV
 # ============================================================
 
-async def fetch_ohlcv(symbol, timeframe, limit=100):
+async def fetch_ohlcv(
+    symbol,
+    timeframe,
+    limit=100
+):
+
     try:
+
         raw = await bybit.fetch_ohlcv(
             symbol,
             timeframe=timeframe,
             limit=limit,
-            params={"category": "linear"}
+            params={
+                "category": "linear"
+            },
         )
 
-        if not raw or len(raw) < 55:
+        if not raw:
+            return None
+
+        if len(raw) < 55:
             return None
 
         df = pd.DataFrame(
             raw,
-            columns=["timestamp", "open", "high", "low", "close", "volume"]
+            columns=[
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+            ],
         )
+
+        numeric_columns = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+
+        for column in numeric_columns:
+
+            df[column] = pd.to_numeric(
+                df[column],
+                errors="coerce"
+            )
+
+        df = df.dropna().reset_index(
+            drop=True
+        )
+
         return df
 
     except Exception as e:
+
+        print(
+            f"\n⚠️ OHLCV error "
+            f"{symbol} {timeframe}: {e}"
+        )
+
         return None
 
 
@@ -147,321 +321,1381 @@ async def fetch_ohlcv(symbol, timeframe, limit=100):
 # ============================================================
 
 def analyze_1h_indicators(df_1h):
-    df_1h["EMA50"] = calculate_ema(df_1h["close"], 50)
-    df_1h["CCI50"] = calculate_cci(df_1h, 50)
-    df_1h["CCI7"] = calculate_cci(df_1h, 7)
 
-    last = df_1h.iloc[-2]
+    if df_1h is None:
+        return "NEUTRAL"
 
-    long_condition = (
-        last["close"] > last["EMA50"]
-        and last["CCI50"] > 0
-        and df_1h["CCI7"].iloc[-4:-1].min() < -80
+    if len(df_1h) < 55:
+        return "NEUTRAL"
+
+    df = df_1h.copy()
+
+    df["EMA50"] = calculate_ema(
+        df["close"],
+        50
     )
 
-    short_condition = (
-        last["close"] < last["EMA50"]
-        and last["CCI50"] < 0
-        and df_1h["CCI7"].iloc[-4:-1].max() > 80
+    df["CCI50"] = calculate_cci(
+        df,
+        50
     )
 
-    if long_condition:
+    df["CCI7"] = calculate_cci(
+        df,
+        7
+    )
+
+    # Last closed candle
+    last = df.iloc[-2]
+
+    recent_cci7 = (
+        df["CCI7"]
+        .iloc[-5:-1]
+    )
+
+    if len(recent_cci7) < 3:
+        return "NEUTRAL"
+
+    # ========================================================
+    # BULLISH
+    # ========================================================
+
+    bullish = (
+
+        last["close"]
+        > last["EMA50"]
+
+        and
+
+        last["CCI50"]
+        > 0
+
+        and
+
+        recent_cci7.min()
+        < -80
+
+        and
+
+        last["CCI7"]
+        > -20
+    )
+
+    # ========================================================
+    # BEARISH
+    # ========================================================
+
+    bearish = (
+
+        last["close"]
+        < last["EMA50"]
+
+        and
+
+        last["CCI50"]
+        < 0
+
+        and
+
+        recent_cci7.max()
+        > 80
+
+        and
+
+        last["CCI7"]
+        < 20
+    )
+
+    if bullish:
         return "BULLISH"
-    elif short_condition:
+
+    if bearish:
         return "BEARISH"
 
     return "NEUTRAL"
 
 
 # ============================================================
-# RELIABLE 5M SMC CHoCH + RETEST
+# CONFIRMED SWINGS
 # ============================================================
 
-def check_5m_choch_and_retest(df_5m, bias_1h):
-    if df_5m is None or len(df_5m) < 80:
-        return (None, None, None, None, None)
+def find_confirmed_swings(
+    df,
+    left=3,
+    right=3
+):
+
+    highs = df["high"].values
+    lows = df["low"].values
+
+    swing_highs = []
+    swing_lows = []
+
+    for i in range(
+        left,
+        len(df) - right
+    ):
+
+        is_high = (
+            all(
+                highs[i] > highs[i - k]
+                for k in range(1, left + 1)
+            )
+            and
+            all(
+                highs[i] > highs[i + k]
+                for k in range(1, right + 1)
+            )
+        )
+
+        is_low = (
+            all(
+                lows[i] < lows[i - k]
+                for k in range(1, left + 1)
+            )
+            and
+            all(
+                lows[i] < lows[i + k]
+                for k in range(1, right + 1)
+            )
+        )
+
+        if is_high:
+            swing_highs.append(i)
+
+        if is_low:
+            swing_lows.append(i)
+
+    return swing_highs, swing_lows
+
+
+# ============================================================
+# BODY RATIO
+# ============================================================
+
+def candle_body_ratio(
+    open_price,
+    high_price,
+    low_price,
+    close_price
+):
+
+    candle_range = (
+        high_price - low_price
+    )
+
+    if candle_range <= 0:
+        return 0
+
+    body = abs(
+        close_price - open_price
+    )
+
+    return body / candle_range
+
+
+# ============================================================
+# LIQUIDITY SWEEP
+# ============================================================
+
+def detect_bullish_liquidity_sweep(
+    df,
+    start_idx,
+    end_idx,
+    protected_low
+):
+
+    lows = df["low"].values
+    closes = df["close"].values
+
+    for i in range(
+        start_idx,
+        end_idx + 1
+    ):
+
+        swept = (
+            lows[i]
+            < protected_low
+        )
+
+        recovered = (
+            closes[i]
+            > protected_low
+        )
+
+        if swept and recovered:
+            return i
+
+    return None
+
+
+def detect_bearish_liquidity_sweep(
+    df,
+    start_idx,
+    end_idx,
+    protected_high
+):
+
+    highs = df["high"].values
+    closes = df["close"].values
+
+    for i in range(
+        start_idx,
+        end_idx + 1
+    ):
+
+        swept = (
+            highs[i]
+            > protected_high
+        )
+
+        recovered = (
+            closes[i]
+            < protected_high
+        )
+
+        if swept and recovered:
+            return i
+
+    return None
+
+
+# ============================================================
+# FVG DETECTION
+# ============================================================
+
+def find_bullish_fvg(
+    df,
+    start_idx,
+    end_idx
+):
+
+    highs = df["high"].values
+    lows = df["low"].values
+
+    zones = []
+
+    for i in range(
+        max(2, start_idx),
+        end_idx + 1
+    ):
+
+        # Bullish FVG:
+        #
+        # current low > high of candle i-2
+
+        if lows[i] > highs[i - 2]:
+
+            zones.append(
+                {
+                    "index": i,
+                    "low": highs[i - 2],
+                    "high": lows[i],
+                }
+            )
+
+    return zones
+
+
+def find_bearish_fvg(
+    df,
+    start_idx,
+    end_idx
+):
+
+    highs = df["high"].values
+    lows = df["low"].values
+
+    zones = []
+
+    for i in range(
+        max(2, start_idx),
+        end_idx + 1
+    ):
+
+        # Bearish FVG:
+        #
+        # current high < low of candle i-2
+
+        if highs[i] < lows[i - 2]:
+
+            zones.append(
+                {
+                    "index": i,
+                    "low": highs[i],
+                    "high": lows[i - 2],
+                }
+            )
+
+    return zones
+
+
+# ============================================================
+# ORDER BLOCK
+# ============================================================
+
+def find_bullish_order_block(
+    df,
+    breakout_idx
+):
+
+    opens = df["open"].values
+    closes = df["close"].values
+    highs = df["high"].values
+    lows = df["low"].values
+
+    # Last bearish candle before bullish breakout
+
+    for i in range(
+        breakout_idx - 1,
+        max(-1, breakout_idx - 8),
+        -1
+    ):
+
+        if closes[i] < opens[i]:
+
+            return {
+                "index": i,
+                "low": lows[i],
+                "high": highs[i],
+            }
+
+    return None
+
+
+def find_bearish_order_block(
+    df,
+    breakout_idx
+):
+
+    opens = df["open"].values
+    closes = df["close"].values
+    highs = df["high"].values
+    lows = df["low"].values
+
+    # Last bullish candle before bearish breakout
+
+    for i in range(
+        breakout_idx - 1,
+        max(-1, breakout_idx - 8),
+        -1
+    ):
+
+        if closes[i] > opens[i]:
+
+            return {
+                "index": i,
+                "low": lows[i],
+                "high": highs[i],
+            }
+
+    return None
+
+
+# ============================================================
+# ZONE TOUCH
+# ============================================================
+
+def price_touches_zone(
+    candle_high,
+    candle_low,
+    zone_low,
+    zone_high,
+    tolerance=0.0015
+):
+
+    expanded_low = (
+        zone_low
+        * (1 - tolerance)
+    )
+
+    expanded_high = (
+        zone_high
+        * (1 + tolerance)
+    )
+
+    return (
+        candle_high >= expanded_low
+        and
+        candle_low <= expanded_high
+    )
+
+
+# ============================================================
+# 5M CHoCH + SWEEP + FVG + OB + RETEST
+# ============================================================
+
+def check_5m_choch_and_retest(
+    df_5m,
+    bias_1h
+):
+
+    """
+    FINAL 5M FLOW
+
+    1. Closed candles only
+    2. Confirmed swing structure
+    3. Liquidity sweep
+    4. Strong CHoCH body break
+    5. Displacement
+    6. FVG
+    7. Order Block
+    8. CHoCH + FVG + OB retest
+    9. Rejection candle
+    10. Protected SL
+    11. TP1 / TP2
+    """
+
+    if df_5m is None:
+        return (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    if len(df_5m) < 80:
+        return (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    # ========================================================
+    # REMOVE CURRENT FORMING CANDLE
+    # ========================================================
 
     df = df_5m.iloc[:-1].copy()
-    df.reset_index(drop=True, inplace=True)
+
+    df.reset_index(
+        drop=True,
+        inplace=True
+    )
 
     if len(df) < 70:
-        return (None, None, None, None, None)
+        return (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    current_idx = len(df) - 1
 
     highs = df["high"].values
     lows = df["low"].values
     opens = df["open"].values
     closes = df["close"].values
 
-    current_idx = len(df) - 1
+    # ========================================================
+    # SWINGS
+    # ========================================================
 
-    SWING_LEFT = 3
-    SWING_RIGHT = 3
-    LOOKBACK = 45
-    STRUCTURE_LOOKBACK = 25
-    MIN_BODY_RATIO = 0.55
-    MIN_DISPLACEMENT = 0.0010
-    RETEST_MAX_BARS = 8
-    RETEST_TOLERANCE = 0.0015
-
-    swing_highs = []
-    swing_lows = []
-
-    for i in range(SWING_LEFT, len(df) - SWING_RIGHT):
-        is_swing_high = (
-            all(highs[i] > highs[i - k] for k in range(1, SWING_LEFT + 1))
-            and all(highs[i] > highs[i + k] for k in range(1, SWING_RIGHT + 1))
+    swing_highs, swing_lows = (
+        find_confirmed_swings(
+            df,
+            SWING_LEFT,
+            SWING_RIGHT
         )
-        is_swing_low = (
-            all(lows[i] < lows[i - k] for k in range(1, SWING_LEFT + 1))
-            and all(lows[i] < lows[i + k] for k in range(1, SWING_RIGHT + 1))
+    )
+
+    if (
+        len(swing_highs) < 2
+        or
+        len(swing_lows) < 2
+    ):
+
+        return (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
 
-        if is_swing_high:
-            swing_highs.append(i)
-        if is_swing_low:
-            swing_lows.append(i)
+    recent_highs = [
+        i
+        for i in swing_highs
+        if i >= current_idx - 50
+    ]
 
-    if len(swing_highs) < 2 or len(swing_lows) < 2:
-        return (None, None, None, None, None)
+    recent_lows = [
+        i
+        for i in swing_lows
+        if i >= current_idx - 50
+    ]
 
-    recent_highs = [i for i in swing_highs if i >= current_idx - LOOKBACK]
-    recent_lows = [i for i in swing_lows if i >= current_idx - LOOKBACK]
+    if (
+        len(recent_highs) < 2
+        or
+        len(recent_lows) < 2
+    ):
 
-    if len(recent_highs) < 2 or len(recent_lows) < 2:
-        return (None, None, None, None, None)
+        return (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
-    # ---------------- BEARISH CHoCH ----------------
+    # ========================================================
+    # BEARISH SETUP
+    # ========================================================
+
     if bias_1h == "BEARISH":
+
         hh_idx = recent_highs[-1]
-        previous_lows = [i for i in recent_lows if i < hh_idx]
+
+        previous_lows = [
+            i
+            for i in recent_lows
+            if i < hh_idx
+        ]
 
         if not previous_lows:
-            return (None, None, None, None, None)
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
 
         hl_idx = previous_lows[-1]
+
+        protected_high = highs[hh_idx]
+
         choch_level = lows[hl_idx]
 
+        # ====================================================
+        # LIQUIDITY SWEEP
+        # ====================================================
+
+        sweep_start = max(
+            hl_idx + 1,
+            current_idx - STRUCTURE_LOOKBACK
+        )
+
+        sweep_end = current_idx - 2
+
+        if sweep_end <= sweep_start:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        sweep_idx = detect_bearish_liquidity_sweep(
+            df,
+            sweep_start,
+            sweep_end,
+            protected_high
+        )
+
+        if sweep_idx is None:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        # ====================================================
+        # CHoCH BREAK
+        # ====================================================
+
         breakout_idx = None
-        search_start = max(hl_idx + 1, current_idx - STRUCTURE_LOOKBACK)
 
-        for k in range(search_start, current_idx + 1):
-            candle_range = highs[k] - lows[k]
-            if candle_range <= 0:
-                continue
+        search_start = max(
+            sweep_idx + 1,
+            current_idx - STRUCTURE_LOOKBACK
+        )
 
-            body = abs(closes[k] - opens[k])
-            body_ratio = body / candle_range
-            displacement = (choch_level - closes[k]) / choch_level
-            bearish_body = closes[k] < opens[k]
+        for k in range(
+            search_start,
+            current_idx + 1
+        ):
+
+            body_ratio = candle_body_ratio(
+                opens[k],
+                highs[k],
+                lows[k],
+                closes[k]
+            )
 
             if (
                 closes[k] < choch_level
-                and bearish_body
-                and body_ratio >= MIN_BODY_RATIO
-                and displacement >= MIN_DISPLACEMENT
+                and
+                closes[k] < opens[k]
+                and
+                body_ratio >= MIN_BODY_RATIO
             ):
-                breakout_idx = k
-                break
+
+                displacement = (
+                    choch_level - closes[k]
+                ) / choch_level
+
+                if (
+                    displacement
+                    >= MIN_DISPLACEMENT
+                ):
+
+                    breakout_idx = k
+                    break
 
         if breakout_idx is None:
-            return (None, None, None, None, None)
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
 
-        bars_after_break = current_idx - breakout_idx
-        if bars_after_break < 1 or bars_after_break > RETEST_MAX_BARS:
-            return (None, None, None, None, None)
+        # ====================================================
+        # FVG
+        # ====================================================
 
-        for r in range(breakout_idx + 1, current_idx + 1):
+        fvg_zones = find_bearish_fvg(
+            df,
+            max(2, breakout_idx - 5),
+            breakout_idx
+        )
+
+        if not fvg_zones:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        fvg = fvg_zones[-1]
+
+        # ====================================================
+        # ORDER BLOCK
+        # ====================================================
+
+        order_block = find_bearish_order_block(
+            df,
+            breakout_idx
+        )
+
+        if order_block is None:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        # ====================================================
+        # RETEST WINDOW
+        # ====================================================
+
+        bars_after_break = (
+            current_idx
+            - breakout_idx
+        )
+
+        if bars_after_break < 1:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        if bars_after_break > RETEST_MAX_BARS:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        # ====================================================
+        # RETEST
+        # ====================================================
+
+        for r in range(
+            breakout_idx + 1,
+            current_idx + 1
+        ):
+
             retest_high = highs[r]
-            retest_close = closes[r]
+            retest_low = lows[r]
+
             retest_open = opens[r]
+            retest_close = closes[r]
 
-            touched_level = (
-                retest_high >= choch_level * (1 - RETEST_TOLERANCE)
-                and retest_high <= choch_level * (1 + RETEST_TOLERANCE)
-            )
-            wick_retest = (
-                retest_high >= choch_level
-                and retest_close < choch_level
+            # CHoCH level touch
+            choch_touch = price_touches_zone(
+                retest_high,
+                retest_low,
+                choch_level,
+                choch_level,
+                RETEST_TOLERANCE
             )
 
-            if not (touched_level or wick_retest):
+            # FVG touch
+            fvg_touch = price_touches_zone(
+                retest_high,
+                retest_low,
+                fvg["low"],
+                fvg["high"],
+                RETEST_TOLERANCE
+            )
+
+            # OB touch
+            ob_touch = price_touches_zone(
+                retest_high,
+                retest_low,
+                order_block["low"],
+                order_block["high"],
+                RETEST_TOLERANCE
+            )
+
+            if not choch_touch:
                 continue
 
-            candle_range = retest_high - lows[r]
+            # Require FVG + OB confluence
+            if not fvg_touch:
+                continue
+
+            if not ob_touch:
+                continue
+
+            # =================================================
+            # REJECTION
+            # =================================================
+
+            candle_range = (
+                retest_high
+                - retest_low
+            )
+
             if candle_range <= 0:
                 continue
 
-            body = abs(retest_close - retest_open)
-            upper_wick = retest_high - max(retest_open, retest_close)
-            bearish_close = retest_close < retest_open
-            body_ratio = body / candle_range
+            body = abs(
+                retest_close
+                - retest_open
+            )
+
+            upper_wick = (
+                retest_high
+                - max(
+                    retest_open,
+                    retest_close
+                )
+            )
+
+            bearish_close = (
+                retest_close
+                < retest_open
+            )
+
+            body_ratio = (
+                body
+                / candle_range
+            )
 
             rejection = (
                 bearish_close
-                and retest_close < choch_level
-                and body_ratio >= 0.40
-                and upper_wick >= body * 0.30
+                and
+                retest_close
+                < choch_level
+                and
+                body_ratio >= 0.40
+                and
+                upper_wick >= body * 0.30
             )
 
             if not rejection:
                 continue
 
-            entry = round(retest_close, 4)
-            structure_sl = highs[hh_idx] * 1.0035
-            retest_sl = retest_high * 1.0020
-            sl = round(max(structure_sl, retest_sl), 4)
+            # =================================================
+            # ENTRY
+            # =================================================
+
+            entry = float(
+                retest_close
+            )
+
+            # Protected SL
+            structure_sl = (
+                protected_high
+                * 1.0035
+            )
+
+            retest_sl = (
+                retest_high
+                * 1.0020
+            )
+
+            sl = max(
+                structure_sl,
+                retest_sl
+            )
+
             risk = sl - entry
 
             if risk <= 0:
                 continue
 
-            risk_percent = risk / entry
-            if not (0.0025 <= risk_percent <= 0.035):
+            risk_percent = (
+                risk / entry
+            )
+
+            if not (
+                MIN_RISK_PERCENT
+                <= risk_percent
+                <= MAX_RISK_PERCENT
+            ):
                 continue
 
-            tp1 = round(entry - (risk * 1.5), 4)
-            tp2 = round(entry - (risk * 2.5), 4)
+            tp1 = (
+                entry
+                - risk * TP1_R
+            )
 
-            return ("SELL", entry, sl, tp1, tp2)
+            tp2 = (
+                entry
+                - risk * TP2_R
+            )
 
-    # ---------------- BULLISH CHoCH ----------------
+            setup_id = (
+                f"SELL|"
+                f"{int(df.iloc[breakout_idx]['timestamp'])}|"
+                f"{int(df.iloc[r]['timestamp'])}"
+            )
+
+            return (
+                "SELL",
+                round(entry, 8),
+                round(sl, 8),
+                round(tp1, 8),
+                round(tp2, 8),
+                setup_id,
+            )
+
+    # ========================================================
+    # BULLISH SETUP
+    # ========================================================
+
     elif bias_1h == "BULLISH":
+
         ll_idx = recent_lows[-1]
-        previous_highs = [i for i in recent_highs if i < ll_idx]
+
+        previous_highs = [
+            i
+            for i in recent_highs
+            if i < ll_idx
+        ]
 
         if not previous_highs:
-            return (None, None, None, None, None)
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
 
         lh_idx = previous_highs[-1]
+
+        protected_low = lows[ll_idx]
+
         choch_level = highs[lh_idx]
 
+        # ====================================================
+        # LIQUIDITY SWEEP
+        # ====================================================
+
+        sweep_start = max(
+            lh_idx + 1,
+            current_idx - STRUCTURE_LOOKBACK
+        )
+
+        sweep_end = current_idx - 2
+
+        if sweep_end <= sweep_start:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        sweep_idx = detect_bullish_liquidity_sweep(
+            df,
+            sweep_start,
+            sweep_end,
+            protected_low
+        )
+
+        if sweep_idx is None:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        # ====================================================
+        # CHoCH BREAK
+        # ====================================================
+
         breakout_idx = None
-        search_start = max(lh_idx + 1, current_idx - STRUCTURE_LOOKBACK)
 
-        for k in range(search_start, current_idx + 1):
-            candle_range = highs[k] - lows[k]
-            if candle_range <= 0:
-                continue
+        search_start = max(
+            sweep_idx + 1,
+            current_idx - STRUCTURE_LOOKBACK
+        )
 
-            body = abs(closes[k] - opens[k])
-            body_ratio = body / candle_range
-            displacement = (closes[k] - choch_level) / choch_level
-            bullish_body = closes[k] > opens[k]
+        for k in range(
+            search_start,
+            current_idx + 1
+        ):
+
+            body_ratio = candle_body_ratio(
+                opens[k],
+                highs[k],
+                lows[k],
+                closes[k]
+            )
 
             if (
                 closes[k] > choch_level
-                and bullish_body
-                and body_ratio >= MIN_BODY_RATIO
-                and displacement >= MIN_DISPLACEMENT
+                and
+                closes[k] > opens[k]
+                and
+                body_ratio >= MIN_BODY_RATIO
             ):
-                breakout_idx = k
-                break
+
+                displacement = (
+                    closes[k] - choch_level
+                ) / choch_level
+
+                if (
+                    displacement
+                    >= MIN_DISPLACEMENT
+                ):
+
+                    breakout_idx = k
+                    break
 
         if breakout_idx is None:
-            return (None, None, None, None, None)
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
 
-        bars_after_break = current_idx - breakout_idx
-        if bars_after_break < 1 or bars_after_break > RETEST_MAX_BARS:
-            return (None, None, None, None, None)
+        # ====================================================
+        # FVG
+        # ====================================================
 
-        for r in range(breakout_idx + 1, current_idx + 1):
+        fvg_zones = find_bullish_fvg(
+            df,
+            max(2, breakout_idx - 5),
+            breakout_idx
+        )
+
+        if not fvg_zones:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        fvg = fvg_zones[-1]
+
+        # ====================================================
+        # ORDER BLOCK
+        # ====================================================
+
+        order_block = find_bullish_order_block(
+            df,
+            breakout_idx
+        )
+
+        if order_block is None:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        # ====================================================
+        # RETEST WINDOW
+        # ====================================================
+
+        bars_after_break = (
+            current_idx
+            - breakout_idx
+        )
+
+        if bars_after_break < 1:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        if bars_after_break > RETEST_MAX_BARS:
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+
+        # ====================================================
+        # RETEST
+        # ====================================================
+
+        for r in range(
+            breakout_idx + 1,
+            current_idx + 1
+        ):
+
+            retest_high = highs[r]
             retest_low = lows[r]
-            retest_close = closes[r]
+
             retest_open = opens[r]
+            retest_close = closes[r]
 
-            touched_level = (
-                retest_low >= choch_level * (1 - RETEST_TOLERANCE)
-                and retest_low <= choch_level * (1 + RETEST_TOLERANCE)
-            )
-            wick_retest = (
-                retest_low <= choch_level
-                and retest_close > choch_level
+            # CHoCH level
+            choch_touch = price_touches_zone(
+                retest_high,
+                retest_low,
+                choch_level,
+                choch_level,
+                RETEST_TOLERANCE
             )
 
-            if not (touched_level or wick_retest):
+            # FVG
+            fvg_touch = price_touches_zone(
+                retest_high,
+                retest_low,
+                fvg["low"],
+                fvg["high"],
+                RETEST_TOLERANCE
+            )
+
+            # OB
+            ob_touch = price_touches_zone(
+                retest_high,
+                retest_low,
+                order_block["low"],
+                order_block["high"],
+                RETEST_TOLERANCE
+            )
+
+            if not choch_touch:
                 continue
 
-            candle_range = highs[r] - retest_low
+            if not fvg_touch:
+                continue
+
+            if not ob_touch:
+                continue
+
+            # =================================================
+            # BULLISH REJECTION
+            # =================================================
+
+            candle_range = (
+                retest_high
+                - retest_low
+            )
+
             if candle_range <= 0:
                 continue
 
-            body = abs(retest_close - retest_open)
-            lower_wick = min(retest_open, retest_close) - retest_low
-            bullish_close = retest_close > retest_open
-            body_ratio = body / candle_range
+            body = abs(
+                retest_close
+                - retest_open
+            )
+
+            lower_wick = (
+                min(
+                    retest_open,
+                    retest_close
+                )
+                - retest_low
+            )
+
+            bullish_close = (
+                retest_close
+                > retest_open
+            )
+
+            body_ratio = (
+                body
+                / candle_range
+            )
 
             rejection = (
                 bullish_close
-                and retest_close > choch_level
-                and body_ratio >= 0.40
-                and lower_wick >= body * 0.30
+                and
+                retest_close
+                > choch_level
+                and
+                body_ratio >= 0.40
+                and
+                lower_wick >= body * 0.30
             )
 
             if not rejection:
                 continue
 
-            entry = round(retest_close, 4)
-            structure_sl = lows[ll_idx] * 0.9965
-            retest_sl = retest_low * 0.9980
-            sl = round(min(structure_sl, retest_sl), 4)
+            # =================================================
+            # ENTRY
+            # =================================================
+
+            entry = float(
+                retest_close
+            )
+
+            # Protected SL
+            structure_sl = (
+                protected_low
+                * 0.9965
+            )
+
+            retest_sl = (
+                retest_low
+                * 0.9980
+            )
+
+            sl = min(
+                structure_sl,
+                retest_sl
+            )
+
             risk = entry - sl
 
             if risk <= 0:
                 continue
 
-            risk_percent = risk / entry
-            if not (0.0025 <= risk_percent <= 0.035):
+            risk_percent = (
+                risk / entry
+            )
+
+            if not (
+                MIN_RISK_PERCENT
+                <= risk_percent
+                <= MAX_RISK_PERCENT
+            ):
                 continue
 
-            tp1 = round(entry + (risk * 1.5), 4)
-            tp2 = round(entry + (risk * 2.5), 4)
+            tp1 = (
+                entry
+                + risk * TP1_R
+            )
 
-            return ("BUY", entry, sl, tp1, tp2)
+            tp2 = (
+                entry
+                + risk * TP2_R
+            )
 
-    return (None, None, None, None, None)
+            setup_id = (
+                f"BUY|"
+                f"{int(df.iloc[breakout_idx]['timestamp'])}|"
+                f"{int(df.iloc[r]['timestamp'])}"
+            )
+
+            return (
+                "BUY",
+                round(entry, 8),
+                round(sl, 8),
+                round(tp1, 8),
+                round(tp2, 8),
+                setup_id,
+            )
+
+    # ========================================================
+    # NO SIGNAL
+    # ========================================================
+
+    return (
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+# ============================================================
+# SYMBOL DISPLAY
+# ============================================================
+
+def get_clean_symbol(symbol):
+
+    try:
+
+        pair = symbol.split(":")[0]
+
+        return pair.replace(
+            "/",
+            ""
+        )
+
+    except Exception:
+
+        return symbol.replace(
+            "/",
+            ""
+        )
 
 
 # ============================================================
 # TELEGRAM BROADCAST
 # ============================================================
 
-async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
-    pair_display = symbol.split(":")[0]
-    clean_pair = pair_display.replace("/", "")
+async def broadcast_signal(
+    symbol,
+    side,
+    entry,
+    sl,
+    tp1,
+    tp2
+):
 
-    direction_text = "🟢 LONG" if side == "BUY" else "🔴 SHORT"
-    tv_chart_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{clean_pair}.P"
+    clean_pair = get_clean_symbol(
+        symbol
+    )
 
-    msg = (
-        f"🚨 <b>JK Analyzing</b> 🚨\n\n"
-        f"<b>Exchange:</b> Bybit Futures\n"
+    direction_text = (
+        "🟢 LONG"
+        if side == "BUY"
+        else
+        "🔴 SHORT"
+    )
+
+    tv_chart_url = (
+        "https://www.tradingview.com/chart/"
+        f"?symbol=BYBIT:{clean_pair}.P"
+    )
+
+    message = (
+
+        "🚨 <b>JK ANALYZING</b> 🚨\n\n"
+
+        "<b>Exchange:</b> Bybit Futures\n"
+
         f"<b>Pair:</b> #{clean_pair}\n"
+
         f"<b>Direction:</b> {direction_text}\n\n"
-        f"<b>Confirmations Passed:</b>\n"
-        f"• 1H Trend & Momentum: Aligned\n"
-        f"• 5M Major CHoCH: Confirmed Body Break\n"
-        f"• 5M CHoCH: Closed Candle Confirmation\n"
-        f"• 5M Retest: Level Confirmed\n"
-        f"• 5M Rejection: Confirmed Closed Candle\n\n"
+
+        "<b>Confirmations Passed:</b>\n"
+
+        "• 1H Trend & Momentum: Aligned\n"
+
+        "• 5M Liquidity Sweep: Confirmed\n"
+
+        "• 5M CHoCH: Strong Body Break\n"
+
+        "• 5M Displacement: Confirmed\n"
+
+        "• 5M FVG: Confirmed\n"
+
+        "• 5M Order Block: Confirmed\n"
+
+        "• 5M Retest: Confirmed\n"
+
+        "• 5M Rejection: Confirmed Closed Candle\n\n"
+
         f"🎯 <b>Entry:</b> {entry}\n"
-        f"🛑 <b>Stop Loss:</b> {sl} (Swing Protected)\n"
-        f"🎯 <b>Take Profit 1:</b> {tp1} (1:1.5)\n"
-        f"🚀 <b>Take Profit 2:</b> {tp2} (1:2.5)\n\n"
-        f"📊 <b>Chart:</b> <a href='{tv_chart_url}'>Open on TradingView ↗</a>\n"
+
+        f"🛑 <b>Stop Loss:</b> "
+        f"{sl} (Swing Protected)\n"
+
+        f"🎯 <b>Take Profit 1:</b> "
+        f"{tp1} (1:{TP1_R})\n"
+
+        f"🚀 <b>Take Profit 2:</b> "
+        f"{tp2} (1:{TP2_R})\n\n"
+
+        f"📊 <b>Chart:</b> "
+        f"<a href='{tv_chart_url}'>"
+        "Open on TradingView ↗"
+        "</a>\n"
     )
 
     await tg_bot.send_message(
         chat_id=TELEGRAM_CHAT_ID,
-        text=msg,
+        text=message,
         parse_mode="HTML",
-        disable_web_page_preview=True
+        disable_web_page_preview=True,
     )
 
-    await save_trade(symbol, side, entry, sl, tp1, tp2)
+    await save_trade(
+        symbol,
+        side,
+        entry,
+        sl,
+        tp1,
+        tp2,
+    )
 
     print(
-        f"\n🔥 [5M CHoCH + RETEST SIGNAL] Sent to Telegram: {pair_display} {side}",
-        flush=True
+        f"\n🔥 SIGNAL SENT | "
+        f"{clean_pair} | "
+        f"{side} | "
+        f"Entry={entry} | "
+        f"SL={sl} | "
+        f"TP1={tp1} | "
+        f"TP2={tp2}"
     )
 
 
@@ -470,69 +1704,188 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
 # ============================================================
 
 async def send_weekly_report():
-    data = await get_weekly_performance_data()
 
-    total_signals = 0
-    total_wins = 0
-    total_losses = 0
-    total_pnl = 0.0
+    try:
 
-    lines = []
-    lines.append("<code>Day | Sigs | W - L | Win% | Net PnL</code>")
-    lines.append("<code>-----------------------------------</code>")
-
-    for date_key, stats in data.items():
-        sigs = stats["signals"]
-        w = stats["wins"]
-        l = stats["losses"]
-        pnl = stats["pnl_r"]
-
-        win_rate = int((w / sigs) * 100) if sigs > 0 else 0
-        pnl_str = f"+{pnl:.1f}R" if pnl >= 0 else f"{pnl:.1f}R"
-
-        total_signals += sigs
-        total_wins += w
-        total_losses += l
-        total_pnl += pnl
-
-        lines.append(
-            f"<code>{stats['day']:<3} | {sigs:^4} | {w:^2}-{l:^2} | {win_rate:>3}% | {pnl_str:>7}</code>"
+        data = (
+            await get_weekly_performance_data()
         )
 
-    overall_win_rate = int((total_wins / total_signals) * 100) if total_signals > 0 else 0
-    tot_pnl_str = f"+{total_pnl:.1f}R" if total_pnl >= 0 else f"{total_pnl:.1f}R"
-    status_icon = "🟢" if total_pnl >= 0 else "🔴"
+        total_signals = 0
+        total_wins = 0
+        total_losses = 0
+        total_pnl = 0.0
 
-    lines.append("<code>-----------------------------------</code>")
-    lines.append(
-        f"<code>TOT | {total_signals:^4} | {total_wins:^2}-{total_losses:^2} | {overall_win_rate:>3}% | {tot_pnl_str:>7}</code>"
-    )
+        lines = []
 
-    now_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    report_msg = (
-        f"📊 <b>JK ANALYZING — WEEKLY REPORT</b> 📊\n"
-        f"<i>Automated Weekly Performance Sheet</i>\n\n"
-        + "\n".join(lines)
-        + "\n\n"
-        f"💰 <b>Total Net Return:</b> <code>{tot_pnl_str}</code> {status_icon}\n"
-        f"🎯 <b>Accuracy Rate:</b> <code>{overall_win_rate}%</code>\n"
-        f"📅 <i>Report generated on {now_date}</i>"
-    )
+        lines.append(
+            "<code>"
+            "Day | Sigs | W-L | Win% | Net PnL"
+            "</code>"
+        )
 
-    await tg_bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text=report_msg,
-        parse_mode="HTML"
-    )
+        lines.append(
+            "<code>"
+            "--------------------------------"
+            "</code>"
+        )
 
+        for date_key, stats in data.items():
+
+            sigs = stats["signals"]
+            wins = stats["wins"]
+            losses = stats["losses"]
+            pnl = stats["pnl_r"]
+
+            win_rate = (
+                int(
+                    (wins / sigs) * 100
+                )
+                if sigs > 0
+                else 0
+            )
+
+            pnl_str = (
+                f"+{pnl:.1f}R"
+                if pnl >= 0
+                else
+                f"{pnl:.1f}R"
+            )
+
+            total_signals += sigs
+            total_wins += wins
+            total_losses += losses
+            total_pnl += pnl
+
+            lines.append(
+                "<code>"
+                f"{stats['day']:<3} | "
+                f"{sigs:^4} | "
+                f"{wins:^2}-"
+                f"{losses:^2} | "
+                f"{win_rate:>3}% | "
+                f"{pnl_str:>7}"
+                "</code>"
+            )
+
+        overall_win_rate = (
+            int(
+                (
+                    total_wins
+                    / total_signals
+                ) * 100
+            )
+            if total_signals > 0
+            else 0
+        )
+
+        total_pnl_str = (
+            f"+{total_pnl:.1f}R"
+            if total_pnl >= 0
+            else
+            f"{total_pnl:.1f}R"
+        )
+
+        status_icon = (
+            "🟢"
+            if total_pnl >= 0
+            else
+            "🔴"
+        )
+
+        lines.append(
+            "<code>"
+            "--------------------------------"
+            "</code>"
+        )
+
+        lines.append(
+            "<code>"
+            f"TOT | "
+            f"{total_signals:^4} | "
+            f"{total_wins:^2}-"
+            f"{total_losses:^2} | "
+            f"{overall_win_rate:>3}% | "
+            f"{total_pnl_str:>7}"
+            "</code>"
+        )
+
+        report_message = (
+
+            "📊 "
+            "<b>JK ANALYZING — WEEKLY REPORT</b> "
+            "📊\n"
+
+            "<i>Automated Weekly Performance Sheet</i>\n\n"
+
+            + "\n".join(lines)
+
+            + "\n\n"
+
+            f"💰 <b>Total Net Return:</b> "
+            f"<code>{total_pnl_str}</code> "
+            f"{status_icon}\n"
+
+            f"🎯 <b>Accuracy Rate:</b> "
+            f"<code>{overall_win_rate}%</code>\n"
+
+            f"📅 <i>Report generated on "
+            f"{datetime.utcnow().strftime('%Y-%m-%d')}"
+            "</i>"
+        )
+
+        await tg_bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=report_message,
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+
+        print(
+            f"\n⚠️ Weekly report error: {e}"
+        )
+
+
+# ============================================================
+# WEEKLY REPORT SCHEDULER
+# ============================================================
 
 async def schedule_weekly_report():
+
     while True:
-        now = datetime.now(timezone.utc)
-        if now.weekday() == 6 and now.hour == 23 and now.minute >= 55:
-            await send_weekly_report()
-            await asyncio.sleep(3600)
-        await asyncio.sleep(60)
+
+        try:
+
+            now = datetime.utcnow()
+
+            if (
+                now.weekday() == 6
+                and now.hour == 23
+                and now.minute >= 55
+            ):
+
+                await send_weekly_report()
+
+                await asyncio.sleep(
+                    3600
+                )
+
+            else:
+
+                await asyncio.sleep(
+                    60
+                )
+
+        except Exception as e:
+
+            print(
+                f"\n⚠️ Scheduler error: {e}"
+            )
+
+            await asyncio.sleep(
+                60
+            )
 
 
 # ============================================================
@@ -540,126 +1893,450 @@ async def schedule_weekly_report():
 # ============================================================
 
 async def monitor_open_trades():
-    trades = await get_open_trades()
+
+    try:
+
+        trades = (
+            await get_open_trades()
+        )
+
+    except Exception as e:
+
+        print(
+            f"\n⚠️ Database open-trade error: {e}"
+        )
+
+        return
 
     for trade in trades:
-        t_id, sym, side, entry, sl, tp1, tp2, tp1_hit, _ = trade
 
         try:
-            ticker = await bybit.fetch_ticker(
-                sym,
-                params={"category": "linear"}
+
+            (
+                trade_id,
+                symbol,
+                side,
+                entry,
+                sl,
+                tp1,
+                tp2,
+                tp1_hit,
+                _
+            ) = trade
+
+            ticker = (
+                await bybit.fetch_ticker(
+                    symbol,
+                    params={
+                        "category": "linear"
+                    },
+                )
             )
-            last_price = ticker["last"]
+
+            last_price = ticker.get(
+                "last"
+            )
+
+            if last_price is None:
+                continue
+
+            last_price = float(
+                last_price
+            )
+
+            # =================================================
+            # BUY
+            # =================================================
 
             if side == "BUY":
+
+                # SL first
                 if last_price <= sl:
-                    await close_trade(t_id, "CLOSED_LOSS")
+
+                    await close_trade(
+                        trade_id,
+                        "CLOSED_LOSS"
+                    )
+
+                    print(
+                        f"\n🔴 BUY SL HIT: "
+                        f"{symbol}"
+                    )
+
+                # TP2
                 elif last_price >= tp2:
-                    await close_trade(t_id, "CLOSED_PROFIT")
-                elif not tp1_hit and last_price >= tp1:
-                    await update_trade_tp1(t_id)
+
+                    await close_trade(
+                        trade_id,
+                        "CLOSED_PROFIT"
+                    )
+
+                    print(
+                        f"\n🟢 BUY TP2 HIT: "
+                        f"{symbol}"
+                    )
+
+                # TP1
+                elif (
+                    not tp1_hit
+                    and
+                    last_price >= tp1
+                ):
+
+                    await update_trade_tp1(
+                        trade_id
+                    )
+
+                    print(
+                        f"\n🎯 BUY TP1 HIT: "
+                        f"{symbol}"
+                    )
+
+            # =================================================
+            # SELL
+            # =================================================
 
             elif side == "SELL":
-                if last_price >= sl:
-                    await close_trade(t_id, "CLOSED_LOSS")
-                elif last_price <= tp2:
-                    await close_trade(t_id, "CLOSED_PROFIT")
-                elif not tp1_hit and last_price <= tp1:
-                    await update_trade_tp1(t_id)
 
-        except Exception:
+                # SL first
+                if last_price >= sl:
+
+                    await close_trade(
+                        trade_id,
+                        "CLOSED_LOSS"
+                    )
+
+                    print(
+                        f"\n🔴 SELL SL HIT: "
+                        f"{symbol}"
+                    )
+
+                # TP2
+                elif last_price <= tp2:
+
+                    await close_trade(
+                        trade_id,
+                        "CLOSED_PROFIT"
+                    )
+
+                    print(
+                        f"\n🟢 SELL TP2 HIT: "
+                        f"{symbol}"
+                    )
+
+                # TP1
+                elif (
+                    not tp1_hit
+                    and
+                    last_price <= tp1
+                ):
+
+                    await update_trade_tp1(
+                        trade_id
+                    )
+
+                    print(
+                        f"\n🎯 SELL TP1 HIT: "
+                        f"{symbol}"
+                    )
+
+        except Exception as e:
+
+            print(
+                f"\n⚠️ Trade monitor error "
+                f"{symbol}: {e}"
+            )
+
             continue
 
 
 # ============================================================
-# MAIN SCANNER LOOP
+# MAIN SCANNER
 # ============================================================
 
 async def main():
+
+    # ========================================================
+    # DATABASE
+    # ========================================================
+
     await init_db()
 
-    asyncio.create_task(schedule_weekly_report())
+    # ========================================================
+    # WEEKLY REPORT
+    # ========================================================
+
+    asyncio.create_task(
+        schedule_weekly_report()
+    )
 
     symbols = []
 
+    # ========================================================
+    # LOAD SYMBOLS
+    # ========================================================
+
     while not symbols:
+
         try:
-            symbols = await get_top_100_symbols()
-        except Exception:
-            print("Connecting to Bybit... retrying in 5s.", flush=True)
-            await asyncio.sleep(5)
+
+            symbols = (
+                await get_top_symbols()
+            )
+
+        except Exception as e:
+
+            print(
+                f"\n⚠️ Symbol loading error: "
+                f"{e}"
+            )
+
+            await asyncio.sleep(
+                5
+            )
 
     print(
-        "\n🚀 Scanner Active"
-        "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        "\nTOP 100 Bybit USDT Perpetual Pairs"
-        "\n1H Bias → 5M CHoCH → Displacement → Retest → Rejection"
-        "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        "\n🟢 Closed-Candle Confirmation"
-        "\n🎯 Protected SL"
-        "\n📊 TP1 1:1.5"
-        "\n🚀 TP2 1:2.5"
-        "\n🔄 Multiple Signals Allowed"
-        "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
-        flush=True
+        "\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🚀 JK ANALYZING SCANNER ACTIVE\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Top {len(symbols)} USDT Pairs\n"
+        "1H Bias\n"
+        "   ↓\n"
+        "Liquidity Sweep\n"
+        "   ↓\n"
+        "5M CHoCH\n"
+        "   ↓\n"
+        "Displacement\n"
+        "   ↓\n"
+        "FVG\n"
+        "   ↓\n"
+        "Order Block\n"
+        "   ↓\n"
+        "Retest\n"
+        "   ↓\n"
+        "Rejection\n"
+        "   ↓\n"
+        "🎯 SIGNAL\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🟢 Closed Candle Only\n"
+        "🛑 Protected SL\n"
+        "🎯 TP1 1:1.5\n"
+        "🚀 TP2 1:2.5\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     )
 
+    # ========================================================
+    # CONTINUOUS SCANNER
+    # ========================================================
+
     while True:
+
         try:
+
+            # =================================================
+            # MONITOR EXISTING TRADES
+            # =================================================
+
             await monitor_open_trades()
 
             total = len(symbols)
 
-            for idx, symbol in enumerate(symbols, 1):
-                clean_name = symbol.split(":")[0]
+            # =================================================
+            # SCAN ALL SYMBOLS
+            #
+            # IMPORTANT:
+            # We DO NOT skip symbols with open trades.
+            # =================================================
+
+            for idx, symbol in enumerate(
+                symbols,
+                1
+            ):
+
+                clean_name = (
+                    get_clean_symbol(symbol)
+                )
 
                 print(
-                    f"🔍 [{idx}/{total}] Scanning: {clean_name}...",
+                    f"🔍 [{idx}/{total}] "
+                    f"Scanning {clean_name}...",
+                    end="\r",
                     flush=True
                 )
 
                 try:
-                    df_1h = await fetch_ohlcv(symbol, "1h", limit=60)
-                    df_5m = await fetch_ohlcv(symbol, "5m", limit=100)
 
-                    if df_1h is not None and df_5m is not None:
-                        bias_1h = analyze_1h_indicators(df_1h)
+                    # =========================================
+                    # 1H
+                    # =========================================
 
-                        if bias_1h != "NEUTRAL":
-                            (
+                    df_1h = (
+                        await fetch_ohlcv(
+                            symbol,
+                            "1h",
+                            OHLCV_1H_LIMIT
+                        )
+                    )
+
+                    if df_1h is None:
+                        continue
+
+                    # =========================================
+                    # 5M
+                    # =========================================
+
+                    df_5m = (
+                        await fetch_ohlcv(
+                            symbol,
+                            "5m",
+                            OHLCV_5M_LIMIT
+                        )
+                    )
+
+                    if df_5m is None:
+                        continue
+
+                    # =========================================
+                    # 1H BIAS
+                    # =========================================
+
+                    bias = (
+                        analyze_1h_indicators(
+                            df_1h
+                        )
+                    )
+
+                    if bias == "NEUTRAL":
+
+                        await asyncio.sleep(
+                            0.10
+                        )
+
+                        continue
+
+                    # =========================================
+                    # 5M SETUP
+                    # =========================================
+
+                    (
+                        side,
+                        entry,
+                        sl,
+                        tp1,
+                        tp2,
+                        setup_id,
+                    ) = (
+                        check_5m_choch_and_retest(
+                            df_5m,
+                            bias
+                        )
+                    )
+
+                    # =========================================
+                    # VALID SIGNAL
+                    # =========================================
+
+                    if (
+                        side is not None
+                        and
+                        entry is not None
+                        and
+                        setup_id is not None
+                    ):
+
+                        full_setup_id = (
+                            f"{symbol}|"
+                            f"{setup_id}"
+                        )
+
+                        # =====================================
+                        # DUPLICATE PROTECTION
+                        # =====================================
+
+                        if (
+                            full_setup_id
+                            in sent_setup_ids
+                        ):
+
+                            continue
+
+                        # Mark before Telegram
+                        # to prevent duplicate signals
+                        sent_setup_ids.add(
+                            full_setup_id
+                        )
+
+                        try:
+
+                            await broadcast_signal(
+                                symbol,
                                 side,
                                 entry,
                                 sl,
                                 tp1,
                                 tp2
-                            ) = check_5m_choch_and_retest(df_5m, bias_1h)
+                            )
 
-                            if side and entry:
-                                await broadcast_signal(
-                                    symbol,
-                                    side,
-                                    entry,
-                                    sl,
-                                    tp1,
-                                    tp2
-                                )
+                        except Exception as e:
 
-                        await asyncio.sleep(0.3)
+                            # If Telegram/database fails,
+                            # allow retry on next cycle.
+                            sent_setup_ids.discard(
+                                full_setup_id
+                            )
+
+                            print(
+                                f"\n⚠️ Signal broadcast "
+                                f"failed for "
+                                f"{clean_name}: {e}"
+                            )
+
+                    # Small rate-limit protection
+                    await asyncio.sleep(
+                        0.15
+                    )
 
                 except Exception as e:
+
+                    print(
+                        f"\n⚠️ Error scanning "
+                        f"{clean_name}: {e}"
+                    )
+
                     continue
 
+            # =================================================
+            # CYCLE COMPLETE
+            # =================================================
+
             print(
-                f"\n🔄 Completed 1 cycle of {total} pairs. Waiting 20s for next cycle...",
-                flush=True
+                f"\n🔄 Completed scan "
+                f"of {total} pairs."
+            )
+
+            print(
+                f"⏳ Waiting "
+                f"{SCAN_DELAY}s..."
             )
 
         except Exception as e:
-            print(f"\n⚠️ Main loop alert: {e}", flush=True)
-            await asyncio.sleep(5)
 
-        await asyncio.sleep(20)
+            print(
+                f"\n⚠️ Main loop error: {e}"
+            )
+
+            await asyncio.sleep(
+                5
+            )
+
+        # ====================================================
+        # NEXT SCAN
+        # ====================================================
+
+        await asyncio.sleep(
+            SCAN_DELAY
+        )
 
 
 # ============================================================
@@ -667,7 +2344,27 @@ async def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("\nBot stopped by user.", flush=True)
+
+        asyncio.run(
+            main()
+        )
+
+    except KeyboardInterrupt:
+
+        print(
+            "\n🛑 Bot stopped by user."
+        )
+
+    except SystemExit:
+
+        print(
+            "\n🛑 Bot stopped."
+        )
+
+    except Exception as e:
+
+        print(
+            f"\n❌ Fatal error: {e}"
+        )
