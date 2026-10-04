@@ -1,6 +1,6 @@
 import os
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 import ccxt.async_support as ccxt
 import pandas as pd
 import numpy as np
@@ -66,11 +66,11 @@ async def get_top_75_symbols():
         top_75 = [item['symbol'] for item in usdt_pairs[:75]]
 
         if len(top_75) > 0:
-            print(f"✅ Successfully loaded {len(top_75)} Bybit USDT Pairs by Volume!")
+            print(f"✅ Successfully loaded {len(top_75)} Bybit USDT Pairs by Volume!", flush=True)
             return top_75
 
     except Exception as e:
-        print(f"⚠ Market fetch error: {e}")
+        print(f"⚠️ Market fetch error: {e}", flush=True)
 
     return ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT"]
 
@@ -82,7 +82,10 @@ async def fetch_ohlcv(symbol, timeframe, limit=100):
             return None
 
         return pd.DataFrame(raw, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    except Exception:
+    except Exception as e:
+        if "10006" in str(e) or "Rate Limit" in str(e):
+            print(f"⚠️ Rate limit warning on {symbol}! Pausing briefly...", flush=True)
+            await asyncio.sleep(5)
         return None
 
 
@@ -248,12 +251,11 @@ async def broadcast_signal(symbol, side, entry, sl, tp1, tp2):
     )
 
     await save_trade(symbol, side, entry, sl, tp1, tp2)
-
-    print(f"\n🔥 [VALID CHoCH SIGNAL] Sent to Telegram: {pair_display} {side}")
+    print(f"\n🔥 [VALID CHoCH SIGNAL] Sent to Telegram: {pair_display} {side}", flush=True)
 
 
 # ============================================================
-# WEEKLY PERFORMANCE REPORT TASK (EXCEL SHEET STYLE)
+# WEEKLY PERFORMANCE REPORT TASK
 # ============================================================
 
 async def send_weekly_report():
@@ -297,7 +299,7 @@ async def send_weekly_report():
         + "\n".join(lines) + "\n\n"
         f"💰 <b>Total Net Return:</b> <code>{tot_pnl_str}</code> {status_icon}\n"
         f"🎯 <b>Accuracy Rate:</b> <code>{overall_win_rate}%</code>\n"
-        f"📅 <i>Report generated on {datetime.utcnow().strftime('%Y-%m-%d')}</i>"
+        f"📅 <i>Report generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d')}</i>"
     )
 
     await tg_bot.send_message(
@@ -305,17 +307,15 @@ async def send_weekly_report():
         text=report_msg,
         parse_mode="HTML"
     )
-    print("\n📊 Weekly Performance Report sent to Telegram!")
+    print("\n📊 Weekly Performance Report sent to Telegram!", flush=True)
 
 
 async def schedule_weekly_report():
-    """සෑම ඉරිදා දිනකම UTC රාත්‍රී 23:55 ට වාර්තාව යැවීම"""
     while True:
-        now = datetime.utcnow()
-        # weekday 6 කියන්නේ ඉරිදා (Sunday)
+        now = datetime.now(timezone.utc)
         if now.weekday() == 6 and now.hour == 23 and now.minute >= 55:
             await send_weekly_report()
-            await asyncio.sleep(3600)  # පැයක් නිහඬව සිටීම (duplicate නොවීමට)
+            await asyncio.sleep(3600)
         await asyncio.sleep(60)
 
 
@@ -359,22 +359,30 @@ async def monitor_open_trades():
 
 async def main():
     await init_db()
-
-    # Background එකෙන් Weekly Reporter task එක Run කිරීම
     asyncio.create_task(schedule_weekly_report())
 
-    symbols = []
+    # Startup message එක Telegram වෙත යැවීම
+    try:
+        await tg_bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text="🚀 <b>JK Analyzing Bot Started Successfully!</b>\nScanning Top 75 USDT Pairs...",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"⚠️ Telegram startup alert failed: {e}", flush=True)
 
+    symbols = []
     while not symbols:
         try:
             symbols = await get_top_75_symbols()
         except Exception:
-            print("Connecting to Bybit... retrying in 5s.")
+            print("Connecting to Bybit... retrying in 5s.", flush=True)
             await asyncio.sleep(5)
 
     print(
         "🚀 Scanner Active: Strict 1H Trend + Recent 5M Valid CHoCH "
-        "+ Weekly Performance Tracker (One Trade per Coin)..."
+        "+ Weekly Performance Tracker (One Trade per Coin)...",
+        flush=True
     )
 
     while True:
@@ -390,7 +398,7 @@ async def main():
                 clean_name = symbol.split(':')[0]
                 print(
                     f"🔍 [{idx}/{total}] Scanning: {clean_name}...",
-                    end="\r"
+                    flush=True
                 )
 
                 if symbol in active_symbols:
@@ -423,18 +431,23 @@ async def main():
                                 )
                                 active_symbols.add(symbol)
 
-                    await asyncio.sleep(0.3)
+                    # Bybit Rate limit ආරක්ෂාව සඳහා සුළු delay එකක්
+                    await asyncio.sleep(0.35)
 
-                except Exception:
+                except Exception as e:
+                    if "10006" in str(e):
+                        print(f"⚠️ Rate limit hit! Waiting 10s...", flush=True)
+                        await asyncio.sleep(10)
                     continue
 
             print(
                 f"\n🔄 Completed 1 cycle of {total} pairs. "
-                f"Waiting 20s for next cycle..."
+                f"Waiting 20s for next cycle...\n",
+                flush=True
             )
 
         except Exception as e:
-            print(f"\n⚠️ Main loop alert: {e}")
+            print(f"\n⚠️ Main loop alert: {e}", flush=True)
             await asyncio.sleep(5)
 
         await asyncio.sleep(20)
@@ -448,4 +461,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("\nBot stopped by user.")
+        print("\nBot stopped by user.", flush=True)
