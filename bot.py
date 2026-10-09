@@ -233,7 +233,7 @@ async def main():
     try:
         await tg_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text="🚀 <b>Pullback Candle-Breakout Bot is LIVE!</b>\nScanning 75 Pairs with Auto TP & SL Targets...",
+            text="🚀 <b>Pullback Candle-Breakout Bot is LIVE!</b>\nScanning 100 Pairs with Auto TP & SL Targets...",
             parse_mode="HTML"
         )
     except Exception as e:
