@@ -38,7 +38,7 @@ def calculate_cci(df, length):
     return cci
 
 
-async def get_top_75_symbols():
+async def get_top_100_symbols():
     try:
         markets = await bybit.load_markets()
         tickers = await bybit.fetch_tickers(params={'category': 'linear'})
@@ -242,7 +242,7 @@ async def main():
     symbols = []
     while not symbols:
         try:
-            symbols = await get_top_75_symbols()
+            symbols = await get_top_100_symbols()
         except Exception:
             print("Connecting to Bybit... retrying in 5s.", flush=True)
             await asyncio.sleep(5)
