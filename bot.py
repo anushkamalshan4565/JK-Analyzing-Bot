@@ -57,11 +57,11 @@ async def get_top_75_symbols():
                     usdt_pairs.append({'symbol': symbol, 'volume': float(vol)})
 
         usdt_pairs.sort(key=lambda x: x['volume'], reverse=True)
-        top_75 = [item['symbol'] for item in usdt_pairs[:75]]
+        top_100 = [item['symbol'] for item in usdt_pairs[:100]]
 
-        if len(top_75) > 0:
-            print(f"✅ Successfully loaded {len(top_75)} Bybit USDT Pairs by Volume!", flush=True)
-            return top_75
+        if len(top_100) > 0:
+            print(f"✅ Successfully loaded {len(top_100)} Bybit USDT Pairs by Volume!", flush=True)
+            return top_100
 
     except Exception as e:
         print(f"⚠️ Market fetch error: {e}", flush=True)
