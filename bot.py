@@ -18,15 +18,10 @@ bybit = ccxt.bybit({
 })
 tg_bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
-# එකම Candle එකට දෙවරක් alert යැවීම වැළැක්වීමට
 last_alerted_candles = {}
 
 
 # --- Indicator Calculations ---
-def calculate_ema(series, length):
-    return series.ewm(span=length, adjust=False).mean()
-
-
 def calculate_cci(df, length):
     tp = (df['high'] + df['low'] + df['close']) / 3
     sma = tp.rolling(window=length).mean()
@@ -34,11 +29,10 @@ def calculate_cci(df, length):
         lambda x: np.mean(np.abs(x - np.mean(x)))
     )
     mad = mad.replace(0, 0.00001)
-    cci = (tp - sma) / (0.015 * mad)
-    return cci
+    return (tp - sma) / (0.015 * mad)
 
 
-async def get_top_100_symbols():
+async def get_top_75_symbols():
     try:
         markets = await bybit.load_markets()
         tickers = await bybit.fetch_tickers(params={'category': 'linear'})
@@ -57,11 +51,11 @@ async def get_top_100_symbols():
                     usdt_pairs.append({'symbol': symbol, 'volume': float(vol)})
 
         usdt_pairs.sort(key=lambda x: x['volume'], reverse=True)
-        top_100 = [item['symbol'] for item in usdt_pairs[:100]]
+        top_75 = [item['symbol'] for item in usdt_pairs[:75]]
 
-        if len(top_100) > 0:
-            print(f"✅ Successfully loaded {len(top_100)} Bybit USDT Pairs by Volume!", flush=True)
-            return top_100
+        if len(top_75) > 0:
+            print(f"✅ Successfully loaded {len(top_75)} Bybit USDT Pairs!", flush=True)
+            return top_75
 
     except Exception as e:
         print(f"⚠️ Market fetch error: {e}", flush=True)
@@ -69,118 +63,102 @@ async def get_top_100_symbols():
     return ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "XRP/USDT:USDT", "DOGE/USDT:USDT"]
 
 
-async def fetch_ohlcv(symbol, timeframe, limit=100):
+async def fetch_ohlcv(symbol, timeframe="5m", limit=100):
     try:
         raw = await bybit.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit, params={'category': 'linear'})
-        if not raw or len(raw) < 55:
+        if not raw or len(raw) < 60:
             return None
 
-        return pd.DataFrame(raw, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df = pd.DataFrame(raw, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        return df
     except Exception as e:
         if "10006" in str(e) or "Rate Limit" in str(e):
-            print(f"⚠️ Rate limit warning on {symbol}! Pausing briefly...", flush=True)
+            print(f"⚠️ Rate limit warning on {symbol}! Waiting 5s...", flush=True)
             await asyncio.sleep(5)
         return None
 
 
-def analyze_1h_bias(df_1h):
-    df_1h['EMA50'] = calculate_ema(df_1h['close'], 50)
-    df_1h['CCI50'] = calculate_cci(df_1h, 50)
-    df_1h['CCI7'] = calculate_cci(df_1h, 7)
-
-    last = df_1h.iloc[-2]
-
-    # CCI 50 Zero Line + CCI 7 Pullback Condition
-    long_condition = (
-        (last['close'] > last['EMA50']) and
-        (last['CCI50'] > 0) and
-        (df_1h['CCI7'].iloc[-4:-1].min() < -80)
-    )
-
-    short_condition = (
-        (last['close'] < last['EMA50']) and
-        (last['CCI50'] < 0) and
-        (df_1h['CCI7'].iloc[-4:-1].max() > 80)
-    )
-
-    if long_condition:
-        return "BULLISH"
-    elif short_condition:
-        return "BEARISH"
-
-    return "NEUTRAL"
-
-
 # ============================================================
-# VIDEO LOGIC: PULLBACK CANDLE COVER + AUTO TP / SL
+# EXACT NOTEBOOK LOGIC (5M CCI50 + CCI7 + CANDLE HIGH BREAK BY BODY)
 # ============================================================
 
-def check_pullback_candle_breakout(df_5m, bias_1h):
-    if df_5m is None or len(df_5m) < 30:
+def check_exact_setup(df_5m):
+    if df_5m is None or len(df_5m) < 60:
         return None, None, None, None, None, None, None
 
     # CLOSED CANDLES ONLY
     df = df_5m.iloc[:-1].copy().reset_index(drop=True)
+
+    # 5M Indicators Calculation
+    df['CCI50'] = calculate_cci(df, 50)
+    df['CCI7'] = calculate_cci(df, 7)
+
     current_idx = len(df) - 1
-    current = df.iloc[current_idx]
+    curr = df.iloc[current_idx]
 
     # --------------------------------------------------------
-    # 1. LONG ALERT LOGIC (Pullback Low Breakout)
+    # 🟢 LONG SETUP (පොතේ ඇඳ ඇති ආකාරය)
     # --------------------------------------------------------
-    if bias_1h == "BULLISH":
-        recent_window = df.iloc[max(0, current_idx - 15): current_idx]
-        lowest_idx = recent_window['low'].idxmin()
-        lowest_candle = df.iloc[lowest_idx]
+    # 1. CCI 50 Zero Line එකට උඩින් තිබිය යුතුය
+    if curr['CCI50'] > 0:
+        # 2. පසුගිය candles 15 තුළ CCI 7 එක -80 ට (Oversold) වඩා පහළට ගොස් තිබිය යුතුය
+        lookback = df.iloc[max(0, current_idx - 15): current_idx]
+        min_cci7_idx = lookback['CCI7'].idxmin()
 
-        level_to_cover = lowest_candle['high']
-        bars_since_low = current_idx - lowest_idx
+        if lookback.loc[min_cci7_idx, 'CCI7'] < -80:
+            # හරියටම CCI 7 පහළම dip එක ගහපු වෙලාවේ තිබුණු Candle එක
+            pullback_candle = df.iloc[min_cci7_idx]
+            candle_high_level = pullback_candle['high']
 
-        if 1 <= bars_since_low <= 5:
-            if current['close'] > level_to_cover and current['close'] > current['open']:
-                entry = round(float(current['close']), 6)
-                level = round(float(level_to_cover), 6)
+            bars_passed = current_idx - min_cci7_idx
 
-                # Stop Loss: Pullback Lowest Wick - 0.15% Buffer
-                sl = round(float(lowest_candle['low']) * 0.9985, 6)
-                risk = entry - sl
+            # 3. Pullback එකෙන් පසු candles 1 සිට 5ක් ඇතුළත breakout එක සිදුවීම
+            if 1 <= bars_passed <= 5:
+                # Candle High Break by Body (Close > High of Dip Candle)
+                if curr['close'] > candle_high_level and curr['close'] > curr['open']:
+                    entry = round(float(curr['close']), 6)
+                    level = round(float(candle_high_level), 6)
+                    sl = round(float(pullback_candle['low']) * 0.9985, 6)
+                    risk = entry - sl
 
-                if risk > 0 and (risk / entry) <= 0.04:
-                    tp1 = round(entry + (risk * 2.0), 6)   # 1:2 Risk to Reward
-                    tp2 = round(entry + (risk * 3.5), 6)   # 1:3.5 Risk to Reward
-                    candle_time = int(current['timestamp'])
-                    return "LONG", entry, sl, tp1, tp2, level, candle_time
+                    if risk > 0 and (risk / entry) <= 0.04:
+                        tp1 = round(entry + (risk * 2.0), 6)
+                        tp2 = round(entry + (risk * 3.5), 6)
+                        candle_time = int(curr['timestamp'])
+                        return "LONG", entry, sl, tp1, tp2, level, candle_time
 
     # --------------------------------------------------------
-    # 2. SHORT ALERT LOGIC (Pullback High Breakout)
+    # 🔴 SHORT SETUP (Downtrend Reversal)
     # --------------------------------------------------------
-    elif bias_1h == "BEARISH":
-        recent_window = df.iloc[max(0, current_idx - 15): current_idx]
-        highest_idx = recent_window['high'].idxmax()
-        highest_candle = df.iloc[highest_idx]
+    if curr['CCI50'] < 0:
+        lookback = df.iloc[max(0, current_idx - 15): current_idx]
+        max_cci7_idx = lookback['CCI7'].idxmax()
 
-        level_to_cover = highest_candle['low']
-        bars_since_high = current_idx - highest_idx
+        if lookback.loc[max_cci7_idx, 'CCI7'] > 80:
+            pullback_candle = df.iloc[max_cci7_idx]
+            candle_low_level = pullback_candle['low']
 
-        if 1 <= bars_since_high <= 5:
-            if current['close'] < level_to_cover and current['close'] < current['open']:
-                entry = round(float(current['close']), 6)
-                level = round(float(level_to_cover), 6)
+            bars_passed = current_idx - max_cci7_idx
 
-                # Stop Loss: Pullback Highest Wick + 0.15% Buffer
-                sl = round(float(highest_candle['high']) * 1.0015, 6)
-                risk = sl - entry
+            if 1 <= bars_passed <= 5:
+                # Candle Low Break by Body (Close < Low of High Candle)
+                if curr['close'] < candle_low_level and curr['close'] < curr['open']:
+                    entry = round(float(curr['close']), 6)
+                    level = round(float(candle_low_level), 6)
+                    sl = round(float(pullback_candle['high']) * 1.0015, 6)
+                    risk = sl - entry
 
-                if risk > 0 and (risk / entry) <= 0.04:
-                    tp1 = round(entry - (risk * 2.0), 6)   # 1:2 Risk to Reward
-                    tp2 = round(entry - (risk * 3.5), 6)   # 1:3.5 Risk to Reward
-                    candle_time = int(current['timestamp'])
-                    return "SHORT", entry, sl, tp1, tp2, level, candle_time
+                    if risk > 0 and (risk / entry) <= 0.04:
+                        tp1 = round(entry - (risk * 2.0), 6)
+                        tp2 = round(entry - (risk * 3.5), 6)
+                        candle_time = int(curr['timestamp'])
+                        return "SHORT", entry, sl, tp1, tp2, level, candle_time
 
     return None, None, None, None, None, None, None
 
 
 # ============================================================
-# TELEGRAM BROADCAST (WITH TP & SL)
+# TELEGRAM BROADCAST
 # ============================================================
 
 async def broadcast_alert(symbol, side, entry, sl, tp1, tp2, level, candle_time):
@@ -199,17 +177,18 @@ async def broadcast_alert(symbol, side, entry, sl, tp1, tp2, level, candle_time)
     tv_chart_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{clean_pair}.P"
 
     msg = (
-        f"🚨 <b>PULLBACK BREAKOUT ALERT</b> 🚨\n\n"
+        f"🚨 <b>JK ANALYZING — 100% MATCHED SETUP</b> 🚨\n\n"
         f"<b>Coin:</b> #{clean_pair} (Bybit Futures)\n"
         f"<b>Direction:</b> {direction_text}\n\n"
         f"🎯 <b>Entry:</b> <code>{entry}</code>\n"
         f"🛑 <b>Stop Loss:</b> <code>{sl}</code>\n"
         f"🎯 <b>Take Profit 1 (1:2):</b> <code>{tp1}</code>\n"
         f"🚀 <b>Take Profit 2 (1:3.5):</b> <code>{tp2}</code>\n\n"
-        f"<b>Trigger Details:</b>\n"
-        f"• 1H Trend & CCI 50/7: Aligned\n"
-        f"• 5M Pullback Level: <code>{level}</code>\n"
-        f"• Status: <b>Level Covered & Candle Closed</b> ✅\n\n"
+        f"<b>Trigger Confirmations:</b>\n"
+        f"• 5M CCI 50: Zero Line Filter Passed ✅\n"
+        f"• 5M CCI 7: Pullback Hook Completed ✅\n"
+        f"• Candle High/Low Level: <code>{level}</code>\n"
+        f"• Status: <b>Candle High Broken by Body Close</b> ✅\n\n"
         f"📊 <b>Chart:</b> <a href='{tv_chart_url}'>Open on TradingView ↗</a>\n"
     )
 
@@ -220,7 +199,7 @@ async def broadcast_alert(symbol, side, entry, sl, tp1, tp2, level, candle_time)
             parse_mode="HTML",
             disable_web_page_preview=True
         )
-        print(f"\n🔥 [ALERT SENT] {clean_pair} {side} | Entry: {entry} | SL: {sl} | TP1: {tp1}", flush=True)
+        print(f"\n🔥 [MATCHED ALERT SENT] {clean_pair} {side} at {entry}", flush=True)
     except Exception as e:
         print(f"⚠️ Telegram broadcast failed: {e}", flush=True)
 
@@ -233,7 +212,7 @@ async def main():
     try:
         await tg_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text="🚀 <b>Pullback Candle-Breakout Bot is LIVE!</b>\nScanning 100 Pairs with Auto TP & SL Targets...",
+            text="🚀 <b>JK Analyzing — Exact Notebook Logic Active!</b>\n5M CCI 50/7 + Candle Body Breakout Filter Running...",
             parse_mode="HTML"
         )
     except Exception as e:
@@ -242,12 +221,12 @@ async def main():
     symbols = []
     while not symbols:
         try:
-            symbols = await get_top_100_symbols()
+            symbols = await get_top_75_symbols()
         except Exception:
             print("Connecting to Bybit... retrying in 5s.", flush=True)
             await asyncio.sleep(5)
 
-    print("🚀 Scanner Active: Pullback Candle Cover + Auto TP/SL Calculation...", flush=True)
+    print("🚀 Scanner Active: 100% Matched with Notebook Diagram...", flush=True)
 
     while True:
         try:
@@ -258,14 +237,23 @@ async def main():
                 print(f"🔍 [{idx}/{total}] Scanning: {clean_name}...", end="\r", flush=True)
 
                 try:
-                    df_1h = await fetch_ohlcv(symbol, '1h', limit=60)
+                    # 5M OHLCV දත්ත පමණක් ලබා ගනී
                     df_5m = await fetch_ohlcv(symbol, '5m', limit=60)
 
-                    if df_1h is not None and df_5m is not None:
-                        bias_1h = analyze_1h_bias(df_1h)
+                    if df_5m is not None:
+                        (
+                            side,
+                            entry,
+                            sl,
+                            tp1,
+                            tp2,
+                            level,
+                            candle_time
+                        ) = check_exact_setup(df_5m)
 
-                        if bias_1h != "NEUTRAL":
-                            (
+                        if side:
+                            await broadcast_alert(
+                                symbol,
                                 side,
                                 entry,
                                 sl,
@@ -273,19 +261,7 @@ async def main():
                                 tp2,
                                 level,
                                 candle_time
-                            ) = check_pullback_candle_breakout(df_5m, bias_1h)
-
-                            if side:
-                                await broadcast_alert(
-                                    symbol,
-                                    side,
-                                    entry,
-                                    sl,
-                                    tp1,
-                                    tp2,
-                                    level,
-                                    candle_time
-                                )
+                            )
 
                     await asyncio.sleep(0.35)
 
