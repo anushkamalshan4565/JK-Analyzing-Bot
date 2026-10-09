@@ -18,6 +18,7 @@ bybit = ccxt.bybit({
 })
 tg_bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
+# එකම Candle එකට එක දිගට alert නොයැවීමට
 last_alerted_candles = {}
 
 
@@ -54,7 +55,7 @@ async def get_top_75_symbols():
         top_75 = [item['symbol'] for item in usdt_pairs[:75]]
 
         if len(top_75) > 0:
-            print(f"✅ Successfully loaded {len(top_75)} Bybit USDT Pairs!", flush=True)
+            print(f"✅ Loaded {len(top_75)} Bybit USDT Pairs!", flush=True)
             return top_75
 
     except Exception as e:
@@ -73,23 +74,23 @@ async def fetch_ohlcv(symbol, timeframe="5m", limit=100):
         return df
     except Exception as e:
         if "10006" in str(e) or "Rate Limit" in str(e):
-            print(f"⚠️ Rate limit warning on {symbol}! Waiting 5s...", flush=True)
+            print(f"⚠️ Rate limit on {symbol}, pausing 5s...", flush=True)
             await asyncio.sleep(5)
         return None
 
 
 # ============================================================
-# EXACT NOTEBOOK LOGIC (5M CCI50 + CCI7 + CANDLE HIGH BREAK BY BODY)
+# EXACT VIDEO LOGIC: PULLBACK CANDLE HIGH/LOW BREAK BY BODY CLOSE
 # ============================================================
 
-def check_exact_setup(df_5m):
+def check_pullback_candle_breakout(df_5m):
     if df_5m is None or len(df_5m) < 60:
         return None, None, None, None, None, None, None
 
-    # CLOSED CANDLES ONLY
+    # සෑදී අවසන් වූ (CLOSED) CANDLES පමණක් ගනී (forming candle එක ඉවත් කරයි)
     df = df_5m.iloc[:-1].copy().reset_index(drop=True)
 
-    # 5M Indicators Calculation
+    # 5M Indicators
     df['CCI50'] = calculate_cci(df, 50)
     df['CCI7'] = calculate_cci(df, 7)
 
@@ -97,27 +98,26 @@ def check_exact_setup(df_5m):
     curr = df.iloc[current_idx]
 
     # --------------------------------------------------------
-    # 🟢 LONG SETUP (පොතේ ඇඳ ඇති ආකාරය)
+    # 🟢 1. LONG SETUP (IMG_5337 Video Logic)
     # --------------------------------------------------------
-    # 1. CCI 50 Zero Line එකට උඩින් තිබිය යුතුය
     if curr['CCI50'] > 0:
-        # 2. පසුගිය candles 15 තුළ CCI 7 එක -80 ට (Oversold) වඩා පහළට ගොස් තිබිය යුතුය
+        # පසුගිය candles 15 තුළ CCI7 එක -80 ට වඩා අඩුවී හැරුණු අවස්ථාව
         lookback = df.iloc[max(0, current_idx - 15): current_idx]
         min_cci7_idx = lookback['CCI7'].idxmin()
 
         if lookback.loc[min_cci7_idx, 'CCI7'] < -80:
-            # හරියටම CCI 7 පහළම dip එක ගහපු වෙලාවේ තිබුණු Candle එක
+            # CCI 7 dip එක ගහපු අවම පහළට ගිය Candle එක (Lowest Wick Point)
             pullback_candle = df.iloc[min_cci7_idx]
-            candle_high_level = pullback_candle['high']
+            level_to_break = pullback_candle['high']
 
             bars_passed = current_idx - min_cci7_idx
 
-            # 3. Pullback එකෙන් පසු candles 1 සිට 5ක් ඇතුළත breakout එක සිදුවීම
-            if 1 <= bars_passed <= 5:
-                # Candle High Break by Body (Close > High of Dip Candle)
-                if curr['close'] > candle_high_level and curr['close'] > curr['open']:
+            # Pullback එකෙන් පසු candles 1 සිට 4ක් ඇතුළත
+            if 1 <= bars_passed <= 4:
+                # අනිවාර්යයෙන්ම Candle Body එකෙන්ම High එක කඩා උඩින් CLOSE විය යුතුයි
+                if curr['close'] > level_to_break and curr['close'] > curr['open']:
                     entry = round(float(curr['close']), 6)
-                    level = round(float(candle_high_level), 6)
+                    level = round(float(level_to_break), 6)
                     sl = round(float(pullback_candle['low']) * 0.9985, 6)
                     risk = entry - sl
 
@@ -128,23 +128,26 @@ def check_exact_setup(df_5m):
                         return "LONG", entry, sl, tp1, tp2, level, candle_time
 
     # --------------------------------------------------------
-    # 🔴 SHORT SETUP (Downtrend Reversal)
+    # 🔴 2. SHORT SETUP (IMG_5336 Video Logic)
     # --------------------------------------------------------
     if curr['CCI50'] < 0:
+        # පසුගිය candles 15 තුළ CCI7 එක +80 ට වඩා වැඩිවී හැරුණු අවස්ථාව
         lookback = df.iloc[max(0, current_idx - 15): current_idx]
         max_cci7_idx = lookback['CCI7'].idxmax()
 
         if lookback.loc[max_cci7_idx, 'CCI7'] > 80:
+            # CCI 7 peak එක ගහපු උපරිම ඉහළට ගිය Candle එක (Highest Wick Point)
             pullback_candle = df.iloc[max_cci7_idx]
-            candle_low_level = pullback_candle['low']
+            level_to_break = pullback_candle['low']
 
             bars_passed = current_idx - max_cci7_idx
 
-            if 1 <= bars_passed <= 5:
-                # Candle Low Break by Body (Close < Low of High Candle)
-                if curr['close'] < candle_low_level and curr['close'] < curr['open']:
+            # Pullback එකෙන් පසු candles 1 සිට 4ක් ඇතුළත
+            if 1 <= bars_passed <= 4:
+                # අනිවාර්යයෙන්ම Candle Body එකෙන්ම Low එක කඩා යටින් CLOSE විය යුතුයි
+                if curr['close'] < level_to_break and curr['close'] < curr['open']:
                     entry = round(float(curr['close']), 6)
-                    level = round(float(candle_low_level), 6)
+                    level = round(float(level_to_break), 6)
                     sl = round(float(pullback_candle['high']) * 1.0015, 6)
                     risk = sl - entry
 
@@ -177,18 +180,18 @@ async def broadcast_alert(symbol, side, entry, sl, tp1, tp2, level, candle_time)
     tv_chart_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{clean_pair}.P"
 
     msg = (
-        f"🚨 <b>JK ANALYZING — 100% MATCHED SETUP</b> 🚨\n\n"
+        f"🚨 <b>JK ANALYZING — CONFIRMED BREAKOUT</b> 🚨\n\n"
         f"<b>Coin:</b> #{clean_pair} (Bybit Futures)\n"
         f"<b>Direction:</b> {direction_text}\n\n"
         f"🎯 <b>Entry:</b> <code>{entry}</code>\n"
         f"🛑 <b>Stop Loss:</b> <code>{sl}</code>\n"
         f"🎯 <b>Take Profit 1 (1:2):</b> <code>{tp1}</code>\n"
         f"🚀 <b>Take Profit 2 (1:3.5):</b> <code>{tp2}</code>\n\n"
-        f"<b>Trigger Confirmations:</b>\n"
+        f"<b>Trigger Details:</b>\n"
         f"• 5M CCI 50: Zero Line Filter Passed ✅\n"
         f"• 5M CCI 7: Pullback Hook Completed ✅\n"
-        f"• Candle High/Low Level: <code>{level}</code>\n"
-        f"• Status: <b>Candle High Broken by Body Close</b> ✅\n\n"
+        f"• Broken Level: <code>{level}</code>\n"
+        f"• Status: <b>Level Covered & Candle Closed by Body</b> ✅\n\n"
         f"📊 <b>Chart:</b> <a href='{tv_chart_url}'>Open on TradingView ↗</a>\n"
     )
 
@@ -199,7 +202,7 @@ async def broadcast_alert(symbol, side, entry, sl, tp1, tp2, level, candle_time)
             parse_mode="HTML",
             disable_web_page_preview=True
         )
-        print(f"\n🔥 [MATCHED ALERT SENT] {clean_pair} {side} at {entry}", flush=True)
+        print(f"\n🔥 [CONFIRMED ALERT SENT] {clean_pair} {side} at {entry}", flush=True)
     except Exception as e:
         print(f"⚠️ Telegram broadcast failed: {e}", flush=True)
 
@@ -212,11 +215,11 @@ async def main():
     try:
         await tg_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text="🚀 <b>JK Analyzing — Exact Notebook Logic Active!</b>\n5M CCI 50/7 + Candle Body Breakout Filter Running...",
+            text="🚀 <b>JK Analyzing Bot is LIVE!</b>\nOnly Closed Candle Body Breakouts will be Alerted...",
             parse_mode="HTML"
         )
     except Exception as e:
-        print(f"⚠️ Startup message failed: {e}", flush=True)
+        print(f"⚠️ Startup alert failed: {e}", flush=True)
 
     symbols = []
     while not symbols:
@@ -226,7 +229,7 @@ async def main():
             print("Connecting to Bybit... retrying in 5s.", flush=True)
             await asyncio.sleep(5)
 
-    print("🚀 Scanner Active: 100% Matched with Notebook Diagram...", flush=True)
+    print("🚀 Scanner Active: Closed Candle Body Breakouts Only...", flush=True)
 
     while True:
         try:
@@ -237,7 +240,6 @@ async def main():
                 print(f"🔍 [{idx}/{total}] Scanning: {clean_name}...", end="\r", flush=True)
 
                 try:
-                    # 5M OHLCV දත්ත පමණක් ලබා ගනී
                     df_5m = await fetch_ohlcv(symbol, '5m', limit=60)
 
                     if df_5m is not None:
@@ -249,7 +251,7 @@ async def main():
                             tp2,
                             level,
                             candle_time
-                        ) = check_exact_setup(df_5m)
+                        ) = check_pullback_candle_breakout(df_5m)
 
                         if side:
                             await broadcast_alert(
